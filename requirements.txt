@@ -1,0 +1,9 @@
+# Core NiceGUI
+nicegui>=2.0.0
+
+# Data processing
+pandas>=2.0.0
+
+# Web/HTTP (Turso HTTP API用)
+httpx>=0.25.0
+python-dotenv>=1.0.0
