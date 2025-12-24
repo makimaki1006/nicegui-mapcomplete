@@ -473,8 +473,8 @@ def login_page() -> None:
         )
         ui.label("ログイン").classes("text-lg text-center w-full mb-4").style(f"color: {MUTED_COLOR}")
 
-        email_input = ui.input("メールアドレス", placeholder="user@example.com").classes("w-full")
-        password_input = ui.input("パスワード", password=True, password_toggle_button=True).classes("w-full")
+        email_input = ui.input("メールアドレス", placeholder="user@example.com").classes("w-full").style("color: white")
+        password_input = ui.input("パスワード", password=True, password_toggle_button=True).classes("w-full").style("color: white")
         error_label = ui.label("").classes("text-red-500 text-sm")
 
         def handle_login() -> None:
