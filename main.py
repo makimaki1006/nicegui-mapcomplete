@@ -24,15 +24,17 @@ from nicegui import app, ui, core
 # WebSocket設定の最適化
 # 参考: https://github.com/zauberzeug/nicegui/issues/3410
 try:
+    from nicegui import json as nicegui_json  # NiceGUIのJSONシリアライザーを使用
     core.sio = socketio.AsyncServer(
         async_mode='asgi',
         cors_allowed_origins='*',
-        max_http_buffer_size=50_000_000,  # 50MB（余裕を持たせる）
-        http_compression=True,             # 圧縮有効化（データ量削減）
-        ping_timeout=60,                   # タイムアウト延長（デフォルト20秒）
-        ping_interval=25,                  # ping間隔（デフォルト25秒）
+        json=nicegui_json,                     # 重要: NiceGUIのJSONシリアライザー
+        max_http_buffer_size=50_000_000,       # 50MB（余裕を持たせる）
+        http_compression=True,                  # 圧縮有効化（データ量削減）
+        ping_timeout=60,                        # タイムアウト延長（デフォルト20秒）
+        ping_interval=25,                       # ping間隔（デフォルト25秒）
     )
-    print("[STARTUP] WebSocket optimized: 50MB buffer, compression enabled")
+    print("[STARTUP] WebSocket optimized: 50MB buffer, compression, NiceGUI JSON")
 except Exception as e:
     print(f"[STARTUP] Warning: Could not configure WebSocket: {e}")
 
