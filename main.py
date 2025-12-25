@@ -18,38 +18,7 @@ from typing import List, Dict, Any
 
 import httpx
 import pandas as pd
-import socketio
-from nicegui import app, ui, core
-
-# WebSocket設定の最適化（複数のタイミングで試行）
-# 参考: https://github.com/zauberzeug/nicegui/issues/3410
-def configure_websocket():
-    """WebSocketバッファサイズを増加"""
-    try:
-        from nicegui import json as nicegui_json
-        core.sio = socketio.AsyncServer(
-            async_mode='asgi',
-            cors_allowed_origins='*',
-            json=nicegui_json,
-            max_http_buffer_size=50_000_000,  # 50MB
-            http_compression=True,
-            ping_timeout=60,
-            ping_interval=25,
-        )
-        print("[STARTUP] WebSocket configured: 50MB buffer")
-        return True
-    except Exception as e:
-        print(f"[STARTUP] WebSocket config failed: {e}")
-        return False
-
-# 即座に設定を試行
-configure_websocket()
-
-# app.on_startupでも再設定（NiceGUI初期化後）
-@app.on_startup
-async def startup_configure_websocket():
-    configure_websocket()
-    print("[STARTUP] WebSocket re-configured on startup")
+from nicegui import app, ui
 
 # メモリ最適化: 起動時にガベージコレクション
 gc.collect()
