@@ -6,7 +6,7 @@ services:
     healthCheckPath: /health  # 軽量エンドポイント（5秒以内に応答）
     envVars:
       - key: AUTH_PASSWORD
-        value: cyzen_2025
+        value: cyxen_2025
       - key: ALLOWED_DOMAINS
         value: f-a-c.co.jp,cyxen.co.jp
       - key: NICEGUI_STORAGE_SECRET
