@@ -12,12 +12,16 @@ Includes:
 from __future__ import annotations
 
 import os
+import gc
 from pathlib import Path
 from typing import List, Dict, Any
 
 import httpx
 import pandas as pd
 from nicegui import app, ui
+
+# メモリ最適化: 起動時にガベージコレクション
+gc.collect()
 
 # db_helper.pyをインポート（Reflexと同じデータアクセスロジック）
 try:
@@ -2002,4 +2006,6 @@ if __name__ in {"__main__", "__mp_main__"}:
         reload=not is_production,
         storage_secret=storage_secret,
         show=False,
+        # メモリ最適化: Render 512MB対応
+        reconnect_timeout=30.0,  # WebSocket再接続タイムアウト
     )

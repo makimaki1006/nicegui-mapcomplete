@@ -259,8 +259,8 @@ print("=" * 60)
 
 _cache: dict = {}
 _cache_time: dict = {}
-_max_cache_items = 2000  # 都道府県(47) + 市区町村(約1700) + フィルタデータ
-_ttl_minutes = 120  # デフォルトTTL: 2時間
+_max_cache_items = 100  # メモリ最適化: 100件に削減（Render 512MB対応）
+_ttl_minutes = 30  # メモリ最適化: 30分に短縮
 
 # 永続キャッシュ（TTLなし、明示的にクリアするまで保持）
 _static_cache: dict = {
@@ -620,7 +620,8 @@ def _set_cache(key: str, data):
 
 
 def clear_cache():
-    """全キャッシュをクリア（永続キャッシュ含む）"""
+    """全キャッシュをクリア（永続キャッシュ含む）+ ガベージコレクション"""
+    import gc
     global _cache, _cache_time, _static_cache, _cache_initialized
     _cache = {}
     _cache_time = {}
@@ -630,7 +631,8 @@ def clear_cache():
         "filtered_data": {},
     }
     _cache_initialized = False
-    print("[CACHE] All cache cleared")
+    gc.collect()  # メモリ解放
+    print("[CACHE] All cache cleared + gc.collect()")
 
 
 def refresh_all_cache():
