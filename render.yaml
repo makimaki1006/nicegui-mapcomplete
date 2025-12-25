@@ -3,7 +3,7 @@ services:
     name: nicegui-mapcomplete-dashboard
     runtime: docker
     plan: starter  # $7/月
-    healthCheckPath: /
+    healthCheckPath: /health  # 軽量エンドポイント（5秒以内に応答）
     envVars:
       - key: AUTH_PASSWORD
         value: cyzen_2025

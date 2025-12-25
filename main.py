@@ -459,6 +459,17 @@ def verify_login(email: str, password: str) -> tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------
+# Health check endpoint (Render用 - 5秒以内に応答必須)
+# ---------------------------------------------------------------------
+from fastapi import Response
+
+@app.get("/health")
+async def health_check():
+    """Renderヘルスチェック用の軽量エンドポイント"""
+    return Response(content="OK", media_type="text/plain")
+
+
+# ---------------------------------------------------------------------
 # Login page
 # ---------------------------------------------------------------------
 @ui.page("/login")
@@ -2006,6 +2017,5 @@ if __name__ in {"__main__", "__mp_main__"}:
         reload=not is_production,
         storage_secret=storage_secret,
         show=False,
-        # メモリ最適化: Render 512MB対応
-        reconnect_timeout=30.0,  # WebSocket再接続タイムアウト
+        reconnect_timeout=30.0,
     )
