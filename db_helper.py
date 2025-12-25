@@ -1568,11 +1568,19 @@ def get_municipality_stats(prefecture: str, municipality: str) -> dict:
         # AGE_GENDERから年代別分布を計算
         age_distribution = {"20代": 0, "30代": 0, "40代": 0, "50代": 0, "60代": 0, "70歳以上": 0}
         df_age = batch_data.get("AGE_GENDER", pd.DataFrame())
+        print(f"[DEBUG] AGE_GENDER rows for {prefecture}/{municipality}: {len(df_age)}", flush=True)
+        if not df_age.empty:
+            print(f"[DEBUG] AGE_GENDER columns: {list(df_age.columns)}", flush=True)
+            print(f"[DEBUG] AGE_GENDER sample: {df_age[['category1', 'count']].head().to_dict()}", flush=True)
         if not df_age.empty and 'category1' in df_age.columns and 'count' in df_age.columns:
+            # count列を数値に変換
+            df_age['count'] = pd.to_numeric(df_age['count'], errors='coerce').fillna(0)
             age_dist = df_age.groupby('category1')['count'].sum().to_dict()
+            print(f"[DEBUG] age_dist after groupby: {age_dist}", flush=True)
             for age_group, cnt in age_dist.items():
                 if age_group in age_distribution:
                     age_distribution[age_group] = int(cnt)
+        print(f"[DEBUG] Final age_distribution: {age_distribution}", flush=True)
 
         # 女性比率計算
         total = male_count + female_count
