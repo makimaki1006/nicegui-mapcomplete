@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Force reload: 2025-12-25 v7 - Fix age x gender cross analysis (use persona_data instead of avg_age)
+# Force reload: 2025-12-25 v8 - Fix market overview: use selected region's age_distribution
 """NiceGUI starter dashboard for migrating from Reflex.
 
 Includes:
@@ -1028,13 +1028,19 @@ def dashboard_page() -> None:
                         ui.label("データがありません").style(f"color: {MUTED_COLOR}")
 
                 # === グラフ3: 年齢層×性別分布（グループ化棒グラフ） ===
-                # 全国レベルの男女比から年齢層ごとの推定値を計算
+                # 選択された地域のデータを使用
                 ui.label("年齢層×性別分布").classes("text-sm font-semibold mt-6 mb-2").style(f"color: {MUTED_COLOR}")
                 with ui.card().classes("w-full").style(
                     f"background-color: {CARD_BG}; border: 1px solid {BORDER_COLOR}; padding: 24px; border-radius: 12px"
                 ):
-                    # nat_statsのage_distributionを使用（AGE_GENDERデータから正確に計算）
-                    age_dist_data = nat_stats.get("age_distribution", {})
+                    # 選択された地域に応じたage_distributionを使用
+                    # 優先順位: 市区町村 > 都道府県 > 全国
+                    if muni_val and muni_stats.get("age_distribution"):
+                        age_dist_data = muni_stats.get("age_distribution", {})
+                    elif pref_val and pref_stats.get("age_distribution"):
+                        age_dist_data = pref_stats.get("age_distribution", {})
+                    else:
+                        age_dist_data = nat_stats.get("age_distribution", {})
                     # df_age_distが空でもage_dist_dataがあれば使用
                     effective_age_dist = age_dist_data if age_dist_data else df_age_dist
 
