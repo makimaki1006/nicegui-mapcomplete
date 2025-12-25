@@ -1806,9 +1806,12 @@ def get_rarity_analysis(prefecture: str = None, municipality: str = None,
 
 
 def get_qualification_options(prefecture: str = None, municipality: str = None) -> list:
-    """選択可能な資格リストを取得（Turso用）
+    """選択可能な資格リストを取得（Turso用）- 取得者数順
 
     最適化: _batch_persona_query()を使用して他の人材属性クエリと1回のHTTP通信で取得
+
+    Returns:
+        list: [(資格名, 取得者数), ...] 取得者数の多い順
     """
     if not _HAS_TURSO:
         return []
@@ -1821,10 +1824,19 @@ def get_qualification_options(prefecture: str = None, municipality: str = None) 
         if df.empty:
             return []
 
-        # Python内でユニーク資格リストを抽出（HTTP通信なし）
-        if "category1" in df.columns:
-            qualifications = df["category1"].dropna().unique().tolist()
-            return sorted(qualifications)
+        # Python内で資格ごとの取得者数を集計（HTTP通信なし）
+        if "category1" in df.columns and "count" in df.columns:
+            # 資格ごとにcountを合計
+            grouped = df.groupby("category1")["count"].sum().reset_index()
+            grouped.columns = ["qualification", "total_count"]
+            # 取得者数の多い順にソート
+            grouped = grouped.sort_values("total_count", ascending=False)
+            # (資格名, 取得者数) のタプルリストを返す
+            return [(row["qualification"], int(row["total_count"])) for _, row in grouped.iterrows()]
+        elif "category1" in df.columns:
+            # countがない場合は出現回数でソート
+            counts = df["category1"].value_counts()
+            return [(qual, int(cnt)) for qual, cnt in counts.items()]
 
         return []
 

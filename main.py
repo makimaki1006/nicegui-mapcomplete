@@ -1395,23 +1395,37 @@ def dashboard_page() -> None:
                                     rarity_state["genders"].append(g) if e.value else rarity_state["genders"].remove(g) if g in rarity_state["genders"] else None
                                 )).classes("text-sm").style(f"color: {TEXT_COLOR}")
 
-                    # 資格チェックボックス（レスポンシブグリッド）
+                    # 資格チェックボックス（レスポンシブグリッド）- 取得者数順
                     qual_options = get_qualification_options(pref_val, muni_val)
                     with ui.element("div").classes("p-2 rounded mb-3").style("background-color: rgba(168, 85, 247, 0.05)"):
-                        ui.label("資格（複数選択可）").classes("text-xs font-semibold mb-1").style(f"color: {MUTED_COLOR}")
-                        # レスポンシブグリッド: 画面幅に応じて2〜4列に自動調整
+                        ui.label(f"資格（複数選択可）- 全{len(qual_options)}種類・取得者数順").classes("text-xs font-semibold mb-1").style(f"color: {MUTED_COLOR}")
+                        # レスポンシブグリッド: 1列表示で見やすく
                         with ui.element("div").classes("w-full").style(
                             "display: grid; "
-                            "grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); "
-                            "gap: 4px 16px; "
-                            "max-height: 200px; "
+                            "grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); "
+                            "gap: 2px 12px; "
+                            "max-height: 250px; "
                             "overflow-y: auto; "
                             "padding-right: 8px"
                         ):
-                            for qual in qual_options[:20]:
-                                ui.checkbox(qual, on_change=lambda e, q=qual: (
+                            for qual_item in qual_options[:50]:  # 上位50件表示
+                                # qual_itemは (資格名, 取得者数) のタプル
+                                qual_name = qual_item[0] if isinstance(qual_item, tuple) else qual_item
+                                qual_count = qual_item[1] if isinstance(qual_item, tuple) else 0
+                                # 長い資格名を短縮（「その他（xxx）」→「その他: xxx」）
+                                display_name = qual_name
+                                if qual_name.startswith("その他（") and qual_name.endswith("）"):
+                                    inner = qual_name[4:-1]  # 「その他（」と「）」を除去
+                                    if len(inner) > 15:
+                                        inner = inner[:15] + "..."
+                                    display_name = f"他: {inner}"
+                                elif len(qual_name) > 20:
+                                    display_name = qual_name[:18] + "..."
+                                # ラベルに取得者数を追加
+                                label_text = f"{display_name} ({qual_count:,}人)"
+                                ui.checkbox(label_text, on_change=lambda e, q=qual_name: (
                                     rarity_state["qualifications"].append(q) if e.value else rarity_state["qualifications"].remove(q) if q in rarity_state["qualifications"] else None
-                                )).classes("text-sm").style(f"color: {TEXT_COLOR}; white-space: nowrap")
+                                )).classes("text-xs").style(f"color: {TEXT_COLOR}; white-space: nowrap").tooltip(qual_name)
 
                     # 検索結果表示エリア
                     result_container = ui.column().classes("w-full")
