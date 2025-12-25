@@ -483,7 +483,7 @@ def login_page() -> None:
     with ui.card().classes("absolute-center w-96").style(
         f"background-color: {CARD_BG}; border: 1px solid {BORDER_COLOR}"
     ):
-        ui.label("MapComplete Dashboard").classes("text-2xl font-bold text-center w-full mb-4").style(
+        ui.label("job_ap_analyzer_gui").classes("text-2xl font-bold text-center w-full mb-4").style(
             f"color: {TEXT_COLOR}"
         )
         ui.label("ログイン").classes("text-lg text-center w-full mb-4").style(f"color: {MUTED_COLOR}")
@@ -611,15 +611,7 @@ def dashboard_page() -> None:
 
     # Header
     with ui.header().style(f"background-color: {BG_COLOR}; border-bottom: 1px solid {BORDER_COLOR}"):
-        ui.label("MapComplete Dashboard").classes("text-xl font-bold").style(f"color: {TEXT_COLOR}")
-        if _data_source == "Turso DB":
-            ui.label(f"[DB] {_data_source}").classes("text-sm px-2 py-1 rounded").style(
-                f"background-color: {ACCENT_GREEN}; color: white"
-            )
-        else:
-            ui.label(f"[!] {_data_source}").classes("text-sm px-2 py-1 rounded").style(
-                "background-color: #E69F00; color: white"
-            )
+        ui.label("job_ap_analyzer_gui").classes("text-xl font-bold").style(f"color: {TEXT_COLOR}")
         ui.space()
         ui.label(f"ログイン: {get_user_email()}").classes("text-sm").style(f"color: {MUTED_COLOR}")
 
@@ -1189,8 +1181,8 @@ def dashboard_page() -> None:
                             for item in persona_data:
                                 label = item.get("label", "")
                                 count = item.get("count", 0)
-                                # labelを解析: "50代・女性" -> age="50代", gender="女性"
-                                parts = label.split("・")
+                                # labelを解析: "50代×女性" -> age="50代", gender="女性"
+                                parts = label.split("×")
                                 if len(parts) == 2:
                                     age_part, gender_part = parts
                                     # 年齢表記を正規化
@@ -2018,7 +2010,7 @@ if __name__ in {"__main__", "__mp_main__"}:
     print(f"[STARTUP] Production mode: {is_production}")
 
     ui.run(
-        title="MapComplete Dashboard",
+        title="job_ap_analyzer_gui",
         host="0.0.0.0",
         port=port,
         reload=not is_production,
