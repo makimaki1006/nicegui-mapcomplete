@@ -21,18 +21,20 @@ import pandas as pd
 import socketio
 from nicegui import app, ui, core
 
-# WebSocketメッセージサイズ制限を10MBに増加（デフォルト1MB）
-# NiceGUIインポート直後に設定する必要がある
+# WebSocket設定の最適化
 # 参考: https://github.com/zauberzeug/nicegui/issues/3410
 try:
     core.sio = socketio.AsyncServer(
         async_mode='asgi',
         cors_allowed_origins='*',
-        max_http_buffer_size=10_000_000,  # 10MB
+        max_http_buffer_size=50_000_000,  # 50MB（余裕を持たせる）
+        http_compression=True,             # 圧縮有効化（データ量削減）
+        ping_timeout=60,                   # タイムアウト延長（デフォルト20秒）
+        ping_interval=25,                  # ping間隔（デフォルト25秒）
     )
-    print("[STARTUP] WebSocket buffer size set to 10MB")
+    print("[STARTUP] WebSocket optimized: 50MB buffer, compression enabled")
 except Exception as e:
-    print(f"[STARTUP] Warning: Could not set WebSocket buffer: {e}")
+    print(f"[STARTUP] Warning: Could not configure WebSocket: {e}")
 
 # メモリ最適化: 起動時にガベージコレクション
 gc.collect()
