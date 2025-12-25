@@ -774,7 +774,7 @@ def dashboard_page() -> None:
     @ui.refreshable
     def show_content() -> None:
         filtered_df = get_filtered_data()
-        tab = state.get("tab", "demographics")  # デフォルトをdemographicsに変更
+        tab = state.get("tab", "overview")  # デフォルトをoverviewに変更（軽量・echart無し）
         print(f"[DEBUG] show_content called, tab = {tab}")
 
         with ui.column().classes("w-full p-4"):
