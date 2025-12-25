@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Force reload: 2025-12-24 v6 - Debug AGE_GENDER column structure
+# Force reload: 2025-12-25 v7 - Fix age x gender cross analysis (use persona_data instead of avg_age)
 """NiceGUI starter dashboard for migrating from Reflex.
 
 Includes:
@@ -1185,32 +1185,45 @@ def dashboard_page() -> None:
                     with ui.card().classes("flex-1").style(
                         f"background-color: {CARD_BG}; border: 1px solid {BORDER_COLOR}; padding: 16px"
                     ):
-                        # filtered_dfから年齢×性別データを計算
-                        if "avg_age" in filtered_df.columns and "male_count" in filtered_df.columns and "female_count" in filtered_df.columns:
-                            age_order = ["20代", "30代", "40代", "50代", "60代", "70歳以上"]
+                        # persona_dataから年齢×性別データを計算（正しいデータソース）
+                        # persona_dataのlabelは "50代・女性" のような形式
+                        age_order = ["20代", "30代", "40代", "50代", "60代", "70歳以上"]
+                        male_by_age = {age: 0 for age in age_order}
+                        female_by_age = {age: 0 for age in age_order}
 
-                            def age_to_bucket(age):
-                                try:
-                                    a = float(age)
-                                    if a < 30: return "20代"
-                                    elif a < 40: return "30代"
-                                    elif a < 50: return "40代"
-                                    elif a < 60: return "50代"
-                                    elif a < 70: return "60代"
-                                    else: return "70歳以上"
-                                except:
-                                    return None
+                        if persona_data:
+                            for item in persona_data:
+                                label = item.get("label", "")
+                                count = item.get("count", 0)
+                                # labelを解析: "50代・女性" -> age="50代", gender="女性"
+                                parts = label.split("・")
+                                if len(parts) == 2:
+                                    age_part, gender_part = parts
+                                    # 年齢表記を正規化
+                                    if "70" in age_part or "以上" in age_part:
+                                        age_key = "70歳以上"
+                                    elif "60" in age_part:
+                                        age_key = "60代"
+                                    elif "50" in age_part:
+                                        age_key = "50代"
+                                    elif "40" in age_part:
+                                        age_key = "40代"
+                                    elif "30" in age_part:
+                                        age_key = "30代"
+                                    elif "20" in age_part or "10" in age_part:
+                                        age_key = "20代"
+                                    else:
+                                        continue
 
-                            df_with_bucket = filtered_df.copy()
-                            df_with_bucket["age_bucket"] = df_with_bucket["avg_age"].apply(age_to_bucket)
+                                    if "男" in gender_part:
+                                        male_by_age[age_key] += count
+                                    elif "女" in gender_part:
+                                        female_by_age[age_key] += count
 
-                            # 年齢バケットごとに男女の合計
-                            male_by_age = df_with_bucket.groupby("age_bucket")["male_count"].sum()
-                            female_by_age = df_with_bucket.groupby("age_bucket")["female_count"].sum()
+                        male_data = [male_by_age.get(age, 0) for age in age_order]
+                        female_data = [female_by_age.get(age, 0) for age in age_order]
 
-                            male_data = [int(male_by_age.get(age, 0)) for age in age_order]
-                            female_data = [int(female_by_age.get(age, 0)) for age in age_order]
-
+                        if any(male_data) or any(female_data):
                             ui.echart({
                                 "backgroundColor": "transparent",
                                 "title": {"text": "年齢層×性別分布", "textStyle": {"color": TEXT_COLOR}},
