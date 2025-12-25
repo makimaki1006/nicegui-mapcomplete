@@ -983,31 +983,19 @@ def dashboard_page() -> None:
                         ui.label("データがありません").style(f"color: {MUTED_COLOR}")
 
                 # === グラフ2: 年齢帯別分布（棒グラフ） ===
-                # filtered_dfから直接年齢分布を計算（Tursoクエリに依存しない）
+                # 選択された地域のage_distributionを使用（正しいデータソース）
                 ui.label("年齢帯別分布").classes("text-sm font-semibold mt-6 mb-2").style(f"color: {MUTED_COLOR}")
                 with ui.card().classes("w-full").style(
                     f"background-color: {CARD_BG}; border: 1px solid {BORDER_COLOR}; padding: 24px; border-radius: 12px"
                 ):
-                    # filtered_dfから年齢分布を計算
-                    df_age_dist = {}
-                    if "avg_age" in filtered_df.columns:
-                        age_data = filtered_df["avg_age"].dropna()
-                        if len(age_data) > 0:
-                            # 年齢を年代にバケット化
-                            def age_to_bucket(age):
-                                try:
-                                    a = float(age)
-                                    if a < 30: return "20代"
-                                    elif a < 40: return "30代"
-                                    elif a < 50: return "40代"
-                                    elif a < 60: return "50代"
-                                    elif a < 70: return "60代"
-                                    else: return "70歳以上"
-                                except:
-                                    return None
-
-                            age_buckets = age_data.apply(age_to_bucket).dropna()
-                            df_age_dist = age_buckets.value_counts().to_dict()
+                    # 選択された地域に応じたage_distributionを使用
+                    # 優先順位: 市区町村 > 都道府県 > 全国
+                    if muni_val and muni_stats.get("age_distribution"):
+                        df_age_dist = muni_stats.get("age_distribution", {})
+                    elif pref_val and pref_stats.get("age_distribution"):
+                        df_age_dist = pref_stats.get("age_distribution", {})
+                    else:
+                        df_age_dist = nat_stats.get("age_distribution", {})
 
                     age_bar_data = [{"name": age, "count": int(df_age_dist.get(age, 0))} for age in age_order]
 
