@@ -2010,6 +2010,20 @@ if __name__ in {"__main__", "__mp_main__"}:
     print(f"[STARTUP] Starting NiceGUI app on port {port}...")
     print(f"[STARTUP] Production mode: {is_production}")
 
+    # WebSocketメッセージサイズ制限を10MBに増加（デフォルト1MB）
+    # 参考: https://github.com/zauberzeug/nicegui/issues/3410
+    try:
+        from nicegui import core
+        import socketio
+        core.sio = socketio.AsyncServer(
+            async_mode='asgi',
+            cors_allowed_origins='*',
+            max_http_buffer_size=10_000_000,  # 10MB
+        )
+        print("[STARTUP] WebSocket buffer size increased to 10MB")
+    except Exception as e:
+        print(f"[STARTUP] Warning: Could not increase WebSocket buffer: {e}")
+
     ui.run(
         title="MapComplete Dashboard",
         host="0.0.0.0",
