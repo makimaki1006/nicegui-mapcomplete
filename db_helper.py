@@ -1404,8 +1404,15 @@ def get_national_stats() -> dict:
             print(f"[DEBUG] AGE_GENDER columns: {list(df_age.columns)}", flush=True)
             print(f"[DEBUG] AGE_GENDER sample (first 3 rows): {df_age.head(3).to_dict('records')}", flush=True)
             if 'category1' in df_age.columns and 'count' in df_age.columns:
+                # count列を数値に変換（文字列で格納されている場合の対策）
+                df_age['count'] = pd.to_numeric(df_age['count'], errors='coerce').fillna(0)
                 age_dist = df_age.groupby('category1')['count'].sum().to_dict()
-                result["age_distribution"] = {str(k): int(v) for k, v in age_dist.items() if k}
+                # 事前定義されたキーにマッピング（正規化）
+                normalized_dist = {"20代": 0, "30代": 0, "40代": 0, "50代": 0, "60代": 0, "70歳以上": 0}
+                for k, v in age_dist.items():
+                    if k in normalized_dist:
+                        normalized_dist[k] = int(v)
+                result["age_distribution"] = normalized_dist
                 print(f"[DEBUG] age_distribution: {result['age_distribution']}", flush=True)
             else:
                 # category1がない場合、別のカラムを探す
@@ -1476,10 +1483,17 @@ def get_prefecture_stats(prefecture: str) -> dict:
         # AGE_GENDERから年齢層別分布を計算
         df_age = batch_data.get("AGE_GENDER", pd.DataFrame())
         if not df_age.empty and 'category1' in df_age.columns and 'count' in df_age.columns:
+            # count列を数値に変換（文字列で格納されている場合の対策）
+            df_age['count'] = pd.to_numeric(df_age['count'], errors='coerce').fillna(0)
             age_dist = df_age.groupby('category1')['count'].sum().to_dict()
-            result["age_distribution"] = {str(k): int(v) for k, v in age_dist.items() if k}
+            # 事前定義されたキーにマッピング（正規化）
+            normalized_dist = {"20代": 0, "30代": 0, "40代": 0, "50代": 0, "60代": 0, "70歳以上": 0}
+            for k, v in age_dist.items():
+                if k in normalized_dist:
+                    normalized_dist[k] = int(v)
+            result["age_distribution"] = normalized_dist
 
-        print(f"[DB] Prefecture stats (batch) for {prefecture}: male={result['male_count']}, female={result['female_count']}")
+        print(f"[DB] Prefecture stats (batch) for {prefecture}: male={result['male_count']}, female={result['female_count']}, age_dist={result.get('age_distribution', {})}")
 
     except Exception as e:
         print(f"[ERROR] get_prefecture_stats failed: {e}")
