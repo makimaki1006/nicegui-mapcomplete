@@ -78,6 +78,7 @@ def _find_csv_path() -> tuple[Optional[Path], bool]:
         Path(__file__).parent,  # db_helper.pyと同じディレクトリ
         Path(__file__).parent.parent,  # 親ディレクトリ
         Path.cwd(),  # カレントディレクトリ
+        Path(__file__).parent.parent / "python_scripts" / "data" / "output_v2" / "mapcomplete_complete_sheets",  # python_scripts出力
         Path("/app"),  # Reflex Cloud標準パス
         Path("/app/mapcomplete_dashboard"),  # サブディレクトリ
     ]
@@ -2604,6 +2605,325 @@ def get_muni_flow_top10(prefecture: str = None, municipality: str = None) -> lis
     except Exception as e:
         print(f"[DB] get_muni_flow_top10 error: {e}")
         return []
+
+
+# =====================================
+# WORKSTYLE クロス分析用関数（2025-12-26追加）
+# =====================================
+
+def get_workstyle_distribution(prefecture: str = None, municipality: str = None) -> pd.DataFrame:
+    """雇用形態基本分布を取得
+
+    Returns:
+        DataFrame: columns=[workstyle, count, percentage]
+    """
+    try:
+        if USE_CSV_MODE:
+            df = _load_csv_data()
+            filtered = df[df['row_type'] == 'WORKSTYLE_DISTRIBUTION']
+        else:
+            sql = "SELECT * FROM job_seeker_data WHERE row_type = 'WORKSTYLE_DISTRIBUTION'"
+            filtered = query_df(sql)
+
+        if filtered.empty:
+            return pd.DataFrame()
+
+        # フィルタリング
+        if prefecture:
+            filtered = filtered[filtered['prefecture'] == prefecture]
+        if municipality:
+            filtered = filtered[filtered['municipality'] == municipality]
+
+        if filtered.empty:
+            return pd.DataFrame()
+
+        # 集計（category1 = workstyle）
+        result = filtered.groupby('category1', observed=True).agg({
+            'count': 'sum'
+        }).reset_index()
+        result.columns = ['workstyle', 'count']
+
+        # パーセンテージ計算
+        total = result['count'].sum()
+        result['percentage'] = (result['count'] / total * 100).round(1)
+
+        # 順序を固定
+        order = ['正職員', 'パート', 'その他']
+        result['sort_key'] = result['workstyle'].apply(lambda x: order.index(x) if x in order else 999)
+        result = result.sort_values('sort_key').drop('sort_key', axis=1)
+
+        return result
+
+    except Exception as e:
+        print(f"[DB] get_workstyle_distribution error: {e}")
+        return pd.DataFrame()
+
+
+def get_workstyle_age_cross(prefecture: str = None, municipality: str = None) -> pd.DataFrame:
+    """雇用形態×年代のクロス集計を取得
+
+    Returns:
+        DataFrame: columns=[workstyle, age_group, count, row_pct, col_pct]
+    """
+    try:
+        if USE_CSV_MODE:
+            df = _load_csv_data()
+            filtered = df[df['row_type'] == 'WORKSTYLE_AGE_CROSS']
+        else:
+            sql = "SELECT * FROM job_seeker_data WHERE row_type = 'WORKSTYLE_AGE_CROSS'"
+            filtered = query_df(sql)
+
+        if filtered.empty:
+            return pd.DataFrame()
+
+        # フィルタリング
+        if prefecture:
+            filtered = filtered[filtered['prefecture'] == prefecture]
+        if municipality:
+            filtered = filtered[filtered['municipality'] == municipality]
+
+        if filtered.empty:
+            return pd.DataFrame()
+
+        # 集計（category1 = workstyle, category2 = age_group）
+        result = filtered.groupby(['category1', 'category2'], observed=True).agg({
+            'count': 'sum'
+        }).reset_index()
+        result.columns = ['workstyle', 'age_group', 'count']
+
+        # 行パーセンテージ（各雇用形態内での年代比率）
+        workstyle_totals = result.groupby('workstyle', observed=True)['count'].transform('sum')
+        result['row_pct'] = (result['count'] / workstyle_totals * 100).round(1)
+
+        # 列パーセンテージ（各年代内での雇用形態比率）
+        age_totals = result.groupby('age_group', observed=True)['count'].transform('sum')
+        result['col_pct'] = (result['count'] / age_totals * 100).round(1)
+
+        return result
+
+    except Exception as e:
+        print(f"[DB] get_workstyle_age_cross error: {e}")
+        return pd.DataFrame()
+
+
+def get_workstyle_gender_cross(prefecture: str = None, municipality: str = None) -> pd.DataFrame:
+    """雇用形態×性別のクロス集計を取得
+
+    Returns:
+        DataFrame: columns=[workstyle, gender, count, row_pct, col_pct]
+    """
+    try:
+        if USE_CSV_MODE:
+            df = _load_csv_data()
+            filtered = df[df['row_type'] == 'WORKSTYLE_GENDER_CROSS']
+        else:
+            sql = "SELECT * FROM job_seeker_data WHERE row_type = 'WORKSTYLE_GENDER_CROSS'"
+            filtered = query_df(sql)
+
+        if filtered.empty:
+            return pd.DataFrame()
+
+        # フィルタリング
+        if prefecture:
+            filtered = filtered[filtered['prefecture'] == prefecture]
+        if municipality:
+            filtered = filtered[filtered['municipality'] == municipality]
+
+        if filtered.empty:
+            return pd.DataFrame()
+
+        # 集計（category1 = workstyle, category2 = gender）
+        result = filtered.groupby(['category1', 'category2'], observed=True).agg({
+            'count': 'sum'
+        }).reset_index()
+        result.columns = ['workstyle', 'gender', 'count']
+
+        # 行パーセンテージ（各雇用形態内での性別比率）
+        workstyle_totals = result.groupby('workstyle', observed=True)['count'].transform('sum')
+        result['row_pct'] = (result['count'] / workstyle_totals * 100).round(1)
+
+        # 列パーセンテージ（各性別内での雇用形態比率）
+        gender_totals = result.groupby('gender', observed=True)['count'].transform('sum')
+        result['col_pct'] = (result['count'] / gender_totals * 100).round(1)
+
+        return result
+
+    except Exception as e:
+        print(f"[DB] get_workstyle_gender_cross error: {e}")
+        return pd.DataFrame()
+
+
+def get_workstyle_urgency_cross(prefecture: str = None, municipality: str = None) -> pd.DataFrame:
+    """雇用形態×緊急度のクロス集計を取得
+
+    Returns:
+        DataFrame: columns=[workstyle, urgency, count, row_pct, col_pct]
+    """
+    try:
+        if USE_CSV_MODE:
+            df = _load_csv_data()
+            filtered = df[df['row_type'] == 'WORKSTYLE_URGENCY']
+        else:
+            sql = "SELECT * FROM job_seeker_data WHERE row_type = 'WORKSTYLE_URGENCY'"
+            filtered = query_df(sql)
+
+        if filtered.empty:
+            return pd.DataFrame()
+
+        # フィルタリング
+        if prefecture:
+            filtered = filtered[filtered['prefecture'] == prefecture]
+        if municipality:
+            filtered = filtered[filtered['municipality'] == municipality]
+
+        if filtered.empty:
+            return pd.DataFrame()
+
+        # 集計（category1 = workstyle, category2 = urgency）
+        result = filtered.groupby(['category1', 'category2'], observed=True).agg({
+            'count': 'sum'
+        }).reset_index()
+        result.columns = ['workstyle', 'urgency', 'count']
+
+        # 行パーセンテージ
+        workstyle_totals = result.groupby('workstyle', observed=True)['count'].transform('sum')
+        result['row_pct'] = (result['count'] / workstyle_totals * 100).round(1)
+
+        # 列パーセンテージ
+        urgency_totals = result.groupby('urgency', observed=True)['count'].transform('sum')
+        result['col_pct'] = (result['count'] / urgency_totals * 100).round(1)
+
+        return result
+
+    except Exception as e:
+        print(f"[DB] get_workstyle_urgency_cross error: {e}")
+        return pd.DataFrame()
+
+
+def get_workstyle_employment_cross(prefecture: str = None, municipality: str = None) -> pd.DataFrame:
+    """雇用形態×就業状態のクロス集計を取得
+
+    Returns:
+        DataFrame: columns=[workstyle, employment_status, count, row_pct, col_pct]
+    """
+    try:
+        if USE_CSV_MODE:
+            df = _load_csv_data()
+            filtered = df[df['row_type'] == 'WORKSTYLE_EMPLOYMENT_STATUS']
+        else:
+            sql = "SELECT * FROM job_seeker_data WHERE row_type = 'WORKSTYLE_EMPLOYMENT_STATUS'"
+            filtered = query_df(sql)
+
+        if filtered.empty:
+            return pd.DataFrame()
+
+        # フィルタリング
+        if prefecture:
+            filtered = filtered[filtered['prefecture'] == prefecture]
+        if municipality:
+            filtered = filtered[filtered['municipality'] == municipality]
+
+        if filtered.empty:
+            return pd.DataFrame()
+
+        # 集計（category1 = workstyle, category2 = employment_status）
+        result = filtered.groupby(['category1', 'category2'], observed=True).agg({
+            'count': 'sum'
+        }).reset_index()
+        result.columns = ['workstyle', 'employment_status', 'count']
+
+        # 行パーセンテージ
+        workstyle_totals = result.groupby('workstyle', observed=True)['count'].transform('sum')
+        result['row_pct'] = (result['count'] / workstyle_totals * 100).round(1)
+
+        # 列パーセンテージ
+        emp_totals = result.groupby('employment_status', observed=True)['count'].transform('sum')
+        result['col_pct'] = (result['count'] / emp_totals * 100).round(1)
+
+        return result
+
+    except Exception as e:
+        print(f"[DB] get_workstyle_employment_cross error: {e}")
+        return pd.DataFrame()
+
+
+def get_workstyle_area_count_cross(prefecture: str = None, municipality: str = None) -> pd.DataFrame:
+    """雇用形態×希望勤務地数のクロス集計を取得
+
+    Returns:
+        DataFrame: columns=[workstyle, area_count_group, count, row_pct, col_pct]
+    """
+    try:
+        if USE_CSV_MODE:
+            df = _load_csv_data()
+            filtered = df[df['row_type'] == 'WORKSTYLE_DESIRED_AREA_COUNT']
+        else:
+            sql = "SELECT * FROM job_seeker_data WHERE row_type = 'WORKSTYLE_DESIRED_AREA_COUNT'"
+            filtered = query_df(sql)
+
+        if filtered.empty:
+            return pd.DataFrame()
+
+        # フィルタリング
+        if prefecture:
+            filtered = filtered[filtered['prefecture'] == prefecture]
+        if municipality:
+            filtered = filtered[filtered['municipality'] == municipality]
+
+        if filtered.empty:
+            return pd.DataFrame()
+
+        # 集計（category1 = workstyle, category2 = area_count_group）
+        result = filtered.groupby(['category1', 'category2'], observed=True).agg({
+            'count': 'sum'
+        }).reset_index()
+        result.columns = ['workstyle', 'area_count_group', 'count']
+
+        # 行パーセンテージ
+        workstyle_totals = result.groupby('workstyle', observed=True)['count'].transform('sum')
+        result['row_pct'] = (result['count'] / workstyle_totals * 100).round(1)
+
+        # 列パーセンテージ
+        area_totals = result.groupby('area_count_group', observed=True)['count'].transform('sum')
+        result['col_pct'] = (result['count'] / area_totals * 100).round(1)
+
+        return result
+
+    except Exception as e:
+        print(f"[DB] get_workstyle_area_count_cross error: {e}")
+        return pd.DataFrame()
+
+
+def get_workstyle_summary_stats(prefecture: str = None, municipality: str = None) -> dict:
+    """雇用形態分析のサマリー統計を取得
+
+    Returns:
+        dict: {
+            'total': 総数,
+            'distribution': {workstyle: count},
+            'chi_square': カイ二乗検定結果（概算）
+        }
+    """
+    try:
+        dist_df = get_workstyle_distribution(prefecture, municipality)
+        if dist_df.empty:
+            return {}
+
+        total = int(dist_df['count'].sum())
+        distribution = dict(zip(dist_df['workstyle'], dist_df['count'].astype(int)))
+        percentages = dict(zip(dist_df['workstyle'], dist_df['percentage']))
+
+        return {
+            'total': total,
+            'distribution': distribution,
+            'percentages': percentages,
+            'dominant_workstyle': dist_df.loc[dist_df['count'].idxmax(), 'workstyle'],
+            'dominant_pct': float(dist_df['percentage'].max())
+        }
+
+    except Exception as e:
+        print(f"[DB] get_workstyle_summary_stats error: {e}")
+        return {}
 
 
 if __name__ == "__main__":

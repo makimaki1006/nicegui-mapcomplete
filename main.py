@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Force reload: 2025-12-25 v8 - Fix market overview: use selected region's age_distribution
+# Force reload: 2025-12-26 v16 - Checkbox with inline text like age/gender
 """NiceGUI starter dashboard for migrating from Reflex.
 
 Includes:
@@ -115,7 +115,7 @@ except Exception as exc:  # pragma: no cover
 # ---------------------------------------------------------------------
 TURSO_DATABASE_URL = os.getenv("TURSO_DATABASE_URL", "")
 TURSO_AUTH_TOKEN = os.getenv("TURSO_AUTH_TOKEN", "")
-AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "cyzen_2025")
+AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "cyxen_2025")
 ALLOWED_DOMAINS = [d.strip() for d in os.getenv("ALLOWED_DOMAINS", "f-a-c.co.jp,cyxen.co.jp").split(",")]
 
 # Prefecture ordering (JIS 北→南)
@@ -557,6 +557,21 @@ def dashboard_page() -> None:
     }
     .q-item:hover {
         background-color: rgba(0, 191, 255, 0.2) !important;
+    }
+    /* 資格チェックボックスのラベルを省略しない */
+    .q-checkbox__label {
+        white-space: normal !important;
+        overflow: visible !important;
+        text-overflow: clip !important;
+        max-width: none !important;
+        width: auto !important;
+    }
+    .q-checkbox {
+        max-width: 100% !important;
+        width: 100% !important;
+    }
+    .q-checkbox__inner {
+        flex-shrink: 0 !important;
     }
     </style>
     """)
@@ -1395,37 +1410,28 @@ def dashboard_page() -> None:
                                     rarity_state["genders"].append(g) if e.value else rarity_state["genders"].remove(g) if g in rarity_state["genders"] else None
                                 )).classes("text-sm").style(f"color: {TEXT_COLOR}")
 
-                    # 資格チェックボックス（レスポンシブグリッド）- 取得者数順
+                    # 資格チェックボックス - フル幅で完全表示
                     qual_options = get_qualification_options(pref_val, muni_val)
-                    with ui.element("div").classes("p-2 rounded mb-3").style("background-color: rgba(168, 85, 247, 0.05)"):
-                        ui.label(f"資格（複数選択可）- 全{len(qual_options)}種類・取得者数順").classes("text-xs font-semibold mb-1").style(f"color: {MUTED_COLOR}")
-                        # レスポンシブグリッド: 1列表示で見やすく
+                    with ui.element("div").classes("w-full p-4 rounded mb-3").style("background-color: rgba(168, 85, 247, 0.05)"):
+                        ui.label(f"資格（複数選択可）- 全{len(qual_options)}種類・取得者数順").classes("text-sm font-semibold mb-3").style(f"color: {MUTED_COLOR}")
+                        # フル幅で縦スクロール可能なリスト
                         with ui.element("div").classes("w-full").style(
-                            "display: grid; "
-                            "grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); "
-                            "gap: 2px 12px; "
-                            "max-height: 250px; "
+                            "display: flex; "
+                            "flex-direction: column; "
+                            "gap: 8px; "
+                            "max-height: 400px; "
                             "overflow-y: auto; "
-                            "padding-right: 8px"
+                            "padding-right: 12px"
                         ):
                             for qual_item in qual_options[:50]:  # 上位50件表示
                                 # qual_itemは (資格名, 取得者数) のタプル
                                 qual_name = qual_item[0] if isinstance(qual_item, tuple) else qual_item
                                 qual_count = qual_item[1] if isinstance(qual_item, tuple) else 0
-                                # 長い資格名を短縮（「その他（xxx）」→「その他: xxx」）
-                                display_name = qual_name
-                                if qual_name.startswith("その他（") and qual_name.endswith("）"):
-                                    inner = qual_name[4:-1]  # 「その他（」と「）」を除去
-                                    if len(inner) > 15:
-                                        inner = inner[:15] + "..."
-                                    display_name = f"他: {inner}"
-                                elif len(qual_name) > 20:
-                                    display_name = qual_name[:18] + "..."
-                                # ラベルに取得者数を追加
-                                label_text = f"{display_name} ({qual_count:,}人)"
+                                # 資格名を完全表示 - checkboxにテキストを直接渡す（年代・性別と同じパターン）
+                                label_text = f"{qual_name} ({qual_count:,}人)"
                                 ui.checkbox(label_text, on_change=lambda e, q=qual_name: (
                                     rarity_state["qualifications"].append(q) if e.value else rarity_state["qualifications"].remove(q) if q in rarity_state["qualifications"] else None
-                                )).classes("text-xs").style(f"color: {TEXT_COLOR}; white-space: nowrap").tooltip(qual_name)
+                                )).classes("text-sm").style(f"color: {TEXT_COLOR};")
 
                     # 検索結果表示エリア
                     result_container = ui.column().classes("w-full")
@@ -1940,47 +1946,260 @@ def dashboard_page() -> None:
                     ]:
                         ui.label(desc).style(f"color: {MUTED_COLOR}; font-size: 0.85rem; margin-bottom: 8px")
 
+            elif tab == "workstyle":
+                # === 雇用形態分析タブ（2025-12-26追加） ===
+                ui.label("雇用形態クロス分析").classes("text-xl font-bold mb-4").style(f"color: {TEXT_COLOR}")
+
+                # WORKSTYLEデータ取得
+                from db_helper import (
+                    get_workstyle_distribution,
+                    get_workstyle_age_cross,
+                    get_workstyle_gender_cross,
+                    get_workstyle_urgency_cross,
+                    get_workstyle_employment_cross,
+                    get_workstyle_area_count_cross
+                )
+
+                pref = state["prefecture"] if state["prefecture"] != "全国" else None
+                muni = state["municipality"] if state["municipality"] != "すべて" else None
+
+                # 雇用形態基本分布
+                dist_df = get_workstyle_distribution(pref, muni)
+
+                with ui.row().classes("w-full gap-4 mb-6"):
+                    # 基本分布の円グラフ
+                    with ui.card().classes("p-4").style(
+                        f"background-color: {CARD_BG}; border: 1px solid {BORDER_COLOR}; "
+                        f"border-radius: 12px; flex: 1"
+                    ):
+                        ui.label("雇用形態分布").classes("text-lg font-bold mb-2").style(f"color: {TEXT_COLOR}")
+
+                        if not dist_df.empty:
+                            # 円グラフ
+                            colors = {"正職員": "#4CAF50", "パート": "#FF9800", "その他": "#9E9E9E"}
+                            labels = dist_df["workstyle"].tolist()
+                            values = dist_df["count"].tolist()
+                            chart_colors = [colors.get(l, "#666") for l in labels]
+
+                            from nicegui import ui as nicegui_ui
+                            nicegui_ui.echart({
+                                "tooltip": {"trigger": "item", "formatter": "{b}: {c} ({d}%)"},
+                                "legend": {"orient": "horizontal", "bottom": "0%", "textStyle": {"color": TEXT_COLOR}},
+                                "series": [{
+                                    "type": "pie",
+                                    "radius": ["40%", "70%"],
+                                    "avoidLabelOverlap": True,
+                                    "label": {"show": True, "color": TEXT_COLOR, "formatter": "{b}\n{d}%"},
+                                    "data": [{"value": int(v), "name": l, "itemStyle": {"color": c}}
+                                             for l, v, c in zip(labels, values, chart_colors)]
+                                }]
+                            }).classes("w-full").style("height: 300px")
+                        else:
+                            ui.label("データなし").style(f"color: {MUTED_COLOR}")
+
+                    # KPIカード
+                    with ui.column().classes("gap-2").style("flex: 0 0 200px"):
+                        if not dist_df.empty:
+                            total = int(dist_df["count"].sum())
+                            for _, row in dist_df.iterrows():
+                                ws = row["workstyle"]
+                                cnt = int(row["count"])
+                                pct = row["percentage"]
+                                color = {"正職員": "#4CAF50", "パート": "#FF9800", "その他": "#9E9E9E"}.get(ws, "#666")
+                                with ui.card().classes("p-3").style(
+                                    f"background-color: {CARD_BG}; border-left: 4px solid {color}; "
+                                    f"border-radius: 8px"
+                                ):
+                                    ui.label(ws).style(f"color: {TEXT_COLOR}; font-weight: 600")
+                                    ui.label(f"{cnt:,}人 ({pct}%)").style(f"color: {MUTED_COLOR}; font-size: 0.9rem")
+
+                # 雇用形態×年代クロス分析
+                age_cross_df = get_workstyle_age_cross(pref, muni)
+
+                with ui.card().classes("w-full p-4 mb-4").style(
+                    f"background-color: {CARD_BG}; border: 1px solid {BORDER_COLOR}; border-radius: 12px"
+                ):
+                    ui.label("雇用形態 × 年代").classes("text-lg font-bold mb-2").style(f"color: {TEXT_COLOR}")
+
+                    if not age_cross_df.empty:
+                        # ヒートマップ用データ作成
+                        age_order = ["20代", "30代", "40代", "50代", "60代", "70歳以上"]
+                        workstyle_order = ["正職員", "パート", "その他"]
+
+                        # ピボットテーブル作成
+                        pivot = age_cross_df.pivot(index="workstyle", columns="age_group", values="row_pct")
+                        pivot = pivot.reindex(index=workstyle_order, columns=age_order)
+
+                        # スタック棒グラフ
+                        series_data = []
+                        for ws in workstyle_order:
+                            if ws in pivot.index:
+                                data = [float(pivot.loc[ws, age]) if age in pivot.columns and not pd.isna(pivot.loc[ws, age]) else 0
+                                        for age in age_order]
+                                color = {"正職員": "#4CAF50", "パート": "#FF9800", "その他": "#9E9E9E"}.get(ws, "#666")
+                                series_data.append({
+                                    "name": ws,
+                                    "type": "bar",
+                                    "stack": "total",
+                                    "data": data,
+                                    "itemStyle": {"color": color},
+                                    "label": {"show": True, "formatter": "{c}%", "color": "#fff", "fontSize": 10}
+                                })
+
+                        nicegui_ui.echart({
+                            "tooltip": {"trigger": "axis", "axisPointer": {"type": "shadow"}},
+                            "legend": {"data": workstyle_order, "textStyle": {"color": TEXT_COLOR}, "top": "0%", "itemGap": 15},
+                            "grid": {"left": "3%", "right": "4%", "bottom": "3%", "top": "15%", "containLabel": True},
+                            "xAxis": {"type": "category", "data": age_order, "axisLabel": {"color": TEXT_COLOR}},
+                            "yAxis": {"type": "value", "max": 100, "axisLabel": {"color": TEXT_COLOR, "formatter": "{value}%"}},
+                            "series": series_data
+                        }).classes("w-full").style("height: 350px")
+                    else:
+                        ui.label("データなし").style(f"color: {MUTED_COLOR}")
+
+                # 雇用形態×性別
+                gender_cross_df = get_workstyle_gender_cross(pref, muni)
+
+                with ui.row().classes("w-full gap-4 mb-4"):
+                    with ui.card().classes("p-4").style(
+                        f"background-color: {CARD_BG}; border: 1px solid {BORDER_COLOR}; "
+                        f"border-radius: 12px; flex: 1"
+                    ):
+                        ui.label("雇用形態 × 性別").classes("text-lg font-bold mb-2").style(f"color: {TEXT_COLOR}")
+
+                        if not gender_cross_df.empty:
+                            workstyle_order = ["正職員", "パート", "その他"]
+                            series_m = []
+                            series_f = []
+
+                            for ws in workstyle_order:
+                                ws_data = gender_cross_df[gender_cross_df["workstyle"] == ws]
+                                male_pct = float(ws_data[ws_data["gender"] == "男性"]["row_pct"].values[0]) if len(ws_data[ws_data["gender"] == "男性"]) > 0 else 0
+                                female_pct = float(ws_data[ws_data["gender"] == "女性"]["row_pct"].values[0]) if len(ws_data[ws_data["gender"] == "女性"]) > 0 else 0
+                                series_m.append(male_pct)
+                                series_f.append(female_pct)
+
+                            nicegui_ui.echart({
+                                "tooltip": {"trigger": "axis", "axisPointer": {"type": "shadow"}},
+                                "legend": {"data": ["男性", "女性"], "textStyle": {"color": TEXT_COLOR}, "top": "0%", "itemGap": 15},
+                                "grid": {"left": "3%", "right": "4%", "bottom": "3%", "top": "15%", "containLabel": True},
+                                "xAxis": {"type": "category", "data": workstyle_order, "axisLabel": {"color": TEXT_COLOR}},
+                                "yAxis": {"type": "value", "max": 100, "axisLabel": {"color": TEXT_COLOR, "formatter": "{value}%"}},
+                                "series": [
+                                    {"name": "男性", "type": "bar", "data": series_m, "itemStyle": {"color": "#2196F3"}, "label": {"show": True, "position": "inside", "formatter": "{c}%", "color": "#fff"}},
+                                    {"name": "女性", "type": "bar", "data": series_f, "itemStyle": {"color": "#E91E63"}, "label": {"show": True, "position": "inside", "formatter": "{c}%", "color": "#fff"}}
+                                ]
+                            }).classes("w-full").style("height: 300px")
+                        else:
+                            ui.label("データなし").style(f"color: {MUTED_COLOR}")
+
+                    # 雇用形態×就業状態
+                    emp_cross_df = get_workstyle_employment_cross(pref, muni)
+
+                    with ui.card().classes("p-4").style(
+                        f"background-color: {CARD_BG}; border: 1px solid {BORDER_COLOR}; "
+                        f"border-radius: 12px; flex: 1"
+                    ):
+                        ui.label("雇用形態 × 就業状態").classes("text-lg font-bold mb-2").style(f"color: {TEXT_COLOR}")
+
+                        if not emp_cross_df.empty:
+                            workstyle_order = ["正職員", "パート", "その他"]
+                            emp_status = ["就業中", "離職中", "在学中"]
+
+                            series_data = []
+                            colors = {"就業中": "#4CAF50", "離職中": "#F44336", "在学中": "#9C27B0"}
+
+                            for emp in emp_status:
+                                data = []
+                                for ws in workstyle_order:
+                                    ws_data = emp_cross_df[(emp_cross_df["workstyle"] == ws) & (emp_cross_df["employment_status"] == emp)]
+                                    pct = float(ws_data["row_pct"].values[0]) if len(ws_data) > 0 else 0
+                                    data.append(pct)
+                                series_data.append({
+                                    "name": emp,
+                                    "type": "bar",
+                                    "stack": "total",
+                                    "data": data,
+                                    "itemStyle": {"color": colors.get(emp, "#666")},
+                                    "label": {"show": True, "formatter": "{c}%", "color": "#fff", "fontSize": 10}
+                                })
+
+                            nicegui_ui.echart({
+                                "tooltip": {"trigger": "axis", "axisPointer": {"type": "shadow"}},
+                                "legend": {"data": emp_status, "textStyle": {"color": TEXT_COLOR}, "top": "0%", "itemGap": 15},
+                                "grid": {"left": "3%", "right": "4%", "bottom": "3%", "top": "15%", "containLabel": True},
+                                "xAxis": {"type": "category", "data": workstyle_order, "axisLabel": {"color": TEXT_COLOR}},
+                                "yAxis": {"type": "value", "max": 100, "axisLabel": {"color": TEXT_COLOR, "formatter": "{value}%"}},
+                                "series": series_data
+                            }).classes("w-full").style("height: 300px")
+                        else:
+                            ui.label("データなし").style(f"color: {MUTED_COLOR}")
+
+                # 統計的解説
+                with ui.card().classes("w-full p-4 mt-4").style(
+                    f"background-color: {CARD_BG}; border: 1px solid {BORDER_COLOR}; border-radius: 12px"
+                ):
+                    ui.label("統計的解釈の注意").classes("text-lg font-bold mb-2").style(f"color: {TEXT_COLOR}")
+                    for desc in [
+                        "効果量（Cramér's V）: すべての分析で小〜微小（0.07〜0.17）",
+                        "統計的有意性: サンプルサイズが大きいため、わずかな差でも有意になる",
+                        "実務的示唆: 単一属性での予測精度は低い（61〜68%程度）",
+                        "推奨: 「予測」より「傾向把握→戦略立案」に活用すべき",
+                    ]:
+                        ui.label(f"• {desc}").style(f"color: {MUTED_COLOR}; font-size: 0.85rem; margin-bottom: 4px")
+
             elif tab == "jobmap":
                 ui.label("求人地図（GAS連携）").classes("text-lg font-bold mb-4").style(f"color: {TEXT_COLOR}")
                 gas_urls = {
-                    "介護職": "https://script.google.com/macros/s/AKfycbxd--YaAomrsCpqaLyB40XkTlVOt17bqulrddPVCoFBAOw1FDE7r8mYHMRSKT25D9t7/exec",
+                    "介護職": "https://script.google.com/macros/s/AKfycbyOgFB1uDIRtoUdQQrIEgj3NMwiu4yXsyuGAlN9q7xWsHKDJZFtkk8pLIUxz05P_hAJZg/exec",
                 }
                 current_job = state.get("jobmap_jobtype", list(gas_urls.keys())[0])
                 if current_job not in gas_urls:
                     current_job = list(gas_urls.keys())[0]
                     state["jobmap_jobtype"] = current_job
 
+                # 説明パネル
+                with ui.card().classes("w-full mb-4").style(f"background-color: {PANEL_BG}; border: 1px solid {BORDER_COLOR}"):
+                    with ui.card_section():
+                        ui.label("⚠️ Googleのセキュリティ制限により、求人地図は新しいタブで開きます").style(f"color: {MUTED_COLOR}; font-size: 0.9rem;")
+                        ui.label("下のボタンをクリックすると、求人地図が新しいタブで表示されます。").style(f"color: {TEXT_COLOR}; font-size: 0.85rem; margin-top: 8px;")
+
+                # 職種選択
                 def on_job_change(e):
                     state["jobmap_jobtype"] = e.value if hasattr(e, "value") else e.args
-                    ui.notify(f"Job: {state['jobmap_jobtype']}")
+                    ui.notify(f"職種: {state['jobmap_jobtype']}")
 
-                ui.select(
-                    options=list(gas_urls.keys()),
-                    value=current_job,
-                    label="職種",
-                    on_change=on_job_change,
-                ).classes("w-64").props(
-                    f'outlined dense color=white text-color=white label-color="{MUTED_COLOR}" popup-content-class="bg-blue-grey-10 text-white"'
-                ).style(f"color: {TEXT_COLOR}")
+                with ui.row().classes("items-center gap-4 mb-4"):
+                    ui.select(
+                        options=list(gas_urls.keys()),
+                        value=current_job,
+                        label="職種",
+                        on_change=on_job_change,
+                    ).classes("w-64").props(
+                        f'outlined dense color=white text-color=white label-color="{MUTED_COLOR}" popup-content-class="bg-blue-grey-10 text-white"'
+                    ).style(f"color: {TEXT_COLOR}")
 
-                ui.html(
-                    content=f"""
-                    <iframe
-                        id="jobmap-iframe"
-                        src="{gas_urls[current_job]}"
-                        width="100%"
-                        height="800px"
-                        frameborder="0"
-                        style="border: 1px solid {BORDER_COLOR}; border-radius: 8px; background: white; min-height: 600px;"
-                        allow="geolocation"
-                    ></iframe>
-                    """,
-                    sanitize=False
-                ).classes("w-full")
+                    # 新しいタブで開くボタン
+                    ui.button(
+                        "🗺️ 求人地図を開く",
+                        on_click=lambda: ui.run_javascript(f'window.open("{gas_urls[current_job]}", "_blank")')
+                    ).classes("bg-blue-600 text-white px-6 py-2").props("unelevated")
+
+                # 機能説明
+                with ui.card().classes("w-full").style(f"background-color: {PANEL_BG}; border: 1px solid {BORDER_COLOR}"):
+                    with ui.card_section():
+                        ui.label("求人地図の機能").classes("font-bold mb-2").style(f"color: {TEXT_COLOR}")
+                        for feature in [
+                            "📍 全国の介護求人をマップ上に表示",
+                            "🔍 都道府県・市区町村でフィルタリング",
+                            "💰 給与条件での絞り込み",
+                            "📊 求人数のヒートマップ表示",
+                        ]:
+                            ui.label(feature).style(f"color: {MUTED_COLOR}; font-size: 0.85rem; margin-bottom: 4px")
 
     # Tabs（Reflexと同じ日本語タブ名）
-    tab_names = ["📊 市場概況", "👥 人材属性", "🗺️ 地域・移動パターン", "⚖️ 需給バランス", "🗺️ 求人地図"]
-    tab_ids = ["overview", "demographics", "mobility", "balance", "jobmap"]
+    tab_names = ["📊 市場概況", "👥 人材属性", "🗺️ 地域・移動パターン", "⚖️ 需給バランス", "📈 雇用形態分析", "🗺️ 求人地図"]
+    tab_ids = ["overview", "demographics", "mobility", "balance", "workstyle", "jobmap"]
 
     with ui.row().classes("w-full justify-center gap-2 mb-4 p-2").style(f"background-color: {PANEL_BG}"):
         tab_buttons = []
