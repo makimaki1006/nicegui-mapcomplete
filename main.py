@@ -46,6 +46,8 @@ try:
         get_mobility_type_distribution,
         get_pref_flow_top10,
         get_muni_flow_top10,
+        get_urgency_gender_data,
+        get_urgency_start_category_data,
         PREFECTURE_ORDER as DB_PREFECTURE_ORDER,
     )
     _DB_HELPER_AVAILABLE = True
@@ -74,7 +76,29 @@ except ImportError as e:
     get_mobility_type_distribution = lambda pref=None, muni=None: []
     get_pref_flow_top10 = lambda pref=None: []
     get_muni_flow_top10 = lambda pref=None, muni=None: []
+    get_urgency_gender_data = lambda pref=None, muni=None: []
+    get_urgency_start_category_data = lambda pref=None, muni=None: []
     DB_PREFECTURE_ORDER = []
+
+# コロプレスマップヘルパー（47都道府県GeoJSON対応）
+try:
+    from choropleth_helper import (
+        load_geojson,
+        get_pref_center,
+        get_color_by_value,
+        find_municipality_at_point,
+        PREF_NAME_TO_CODE,
+    )
+    _CHOROPLETH_AVAILABLE = True
+    print("[STARTUP] choropleth_helper.py loaded successfully")
+except ImportError as e:
+    _CHOROPLETH_AVAILABLE = False
+    print(f"[STARTUP] choropleth_helper.py import failed: {e}")
+    load_geojson = lambda pref: None
+    get_pref_center = lambda pref: (36.5, 138.0)
+    get_color_by_value = lambda v, m, mode: "#9ca3af"
+    find_municipality_at_point = lambda lat, lng, data: None
+    PREF_NAME_TO_CODE = {}
 
 def log(msg: str) -> None:
     """centralized stdout logger (flush immediately)"""
@@ -176,6 +200,74 @@ CSV_PATH_ALT = (
 
 _dataframe: pd.DataFrame | None = None
 _data_source: str = "not loaded"
+
+
+# ---------------------------------------------------------------------
+# Municipality Name Normalization（市区町村名正規化）
+# DB名とGeoJSON名の表記ゆれを吸収するための関数
+# ---------------------------------------------------------------------
+import re as _re_module  # モジュールレベルでインポート
+
+
+def generate_name_variants(name: str) -> list:
+    """
+    DB市区町村名からGeoJSON名への変換候補を生成
+
+    パターン:
+    1. 郡名除去: 秩父郡横瀬町 → 横瀬町
+    2. 政令指定都市の区: 大阪市北区 → 北区
+    3. 島嶼部: 三宅島三宅村 → 三宅村
+    4. 浜松市特殊区: 浜松市天竜区 → 天竜区
+    5. 特殊表記: 赤穂郡上郡町 → 上郡町
+
+    Args:
+        name: DB側の市区町村名
+
+    Returns:
+        GeoJSON名への変換候補リスト（元の名前含む）
+    """
+    if not name:
+        return []
+
+    candidates = [name]  # 元の名前も含める
+
+    # 1. 郡名除去: 秩父郡横瀬町 → 横瀬町
+    # 注: non-greedy (.+?) を使用して「赤穂郡上郡町」のような二重郡名に対応
+    gun_match = _re_module.match(r'^(.+?郡)(.+)$', name)
+    if gun_match:
+        candidates.append(gun_match.group(2))
+
+    # 2. 政令指定都市の区: 大阪市北区 → 北区
+    # 対象: 札幌市, 仙台市, さいたま市, 千葉市, 横浜市, 川崎市, 相模原市,
+    #      新潟市, 静岡市, 浜松市, 名古屋市, 京都市, 大阪市, 堺市,
+    #      神戸市, 岡山市, 広島市, 北九州市, 福岡市, 熊本市
+    city_ku_match = _re_module.match(
+        r'^(札幌市|仙台市|さいたま市|千葉市|横浜市|川崎市|相模原市|新潟市|静岡市|浜松市|名古屋市|京都市|大阪市|堺市|神戸市|岡山市|広島市|北九州市|福岡市|熊本市)(.+区)$',
+        name
+    )
+    if city_ku_match:
+        candidates.append(city_ku_match.group(2))
+
+    # 3. 島嶼部: 三宅島三宅村 → 三宅村, 小笠原諸島小笠原村 → 小笠原村
+    island_match = _re_module.match(r'^(.+島|.+諸島)(.+[村町])$', name)
+    if island_match:
+        candidates.append(island_match.group(2))
+
+    # 4. 特殊ケース: 浜松市の新区（2024年再編）
+    # GeoJSONは旧区名（中区、東区、西区、南区、北区、浜北区、天竜区）を使用
+    # 新区名は旧区名のいずれかにマッピング
+    hamamatsu_ward_mapping = {
+        '中央区': ['中区', '東区'],      # 中央区 = 旧中区 + 旧東区
+        '浜名区': ['西区', '南区', '浜北区'],  # 浜名区 = 旧西区 + 旧南区 + 旧浜北区
+    }
+    if name.startswith('浜松市'):
+        ward = name.replace('浜松市', '')
+        if ward in hamamatsu_ward_mapping:
+            for old_ward in hamamatsu_ward_mapping[ward]:
+                candidates.append(old_ward)
+
+    # 重複除去して返す
+    return list(dict.fromkeys(candidates))
 
 
 # ---------------------------------------------------------------------
@@ -522,6 +614,33 @@ def dashboard_page() -> None:
 
     ui.query("body").style(f"background-color: {BG_COLOR}")
 
+    df = _clean_dataframe(load_data())
+
+    # Build prefecture options with JIS north→south ordering
+    prefecture_options: List[str] = ["全国"]
+    if "prefecture" in df.columns:
+        unique_prefs = [p for p in df["prefecture"].dropna().unique().tolist() if p and p != "全国"]
+        order_map = {pref: idx for idx, pref in enumerate(PREFECTURE_ORDER)}
+        unique_prefs.sort(key=lambda x: order_map.get(x, len(PREFECTURE_ORDER) + 1))
+        prefecture_options.extend(unique_prefs)
+    prefectures: List[str] = prefecture_options
+
+    state = app.storage.user
+    state.setdefault("tab", "overview")
+
+    # Header
+    with ui.header().style(f"background-color: {BG_COLOR}; border-bottom: 1px solid {BORDER_COLOR}"):
+        ui.label("job_ap_analyzer_gui").classes("text-xl font-bold").style(f"color: {TEXT_COLOR}")
+        ui.space()
+        ui.label(f"ログイン: {get_user_email()}").classes("text-sm").style(f"color: {MUTED_COLOR}")
+
+        def handle_logout() -> None:
+            app.storage.user["authenticated"] = False
+            app.storage.user["email"] = ""
+            ui.navigate.to("/login")
+
+        ui.button("ログアウト", on_click=handle_logout).props("flat").style(f"color: {TEXT_COLOR}")
+
     # カスタムCSS: ドロップダウンを目立たせる
     ui.add_head_html("""
     <style>
@@ -576,20 +695,6 @@ def dashboard_page() -> None:
     </style>
     """)
 
-    df = _clean_dataframe(load_data())
-
-    # Build prefecture options with JIS north→south ordering
-    # Simple list - browser may sort alphabetically, this is acceptable for now
-    prefecture_options: List[str] = ["全国"]
-    if "prefecture" in df.columns:
-        unique_prefs = [p for p in df["prefecture"].dropna().unique().tolist() if p and p != "全国"]
-        order_map = {pref: idx for idx, pref in enumerate(PREFECTURE_ORDER)}
-        unique_prefs.sort(key=lambda x: order_map.get(x, len(PREFECTURE_ORDER) + 1))
-        prefecture_options.extend(unique_prefs)
-        log(f"[DATA] Prefecture options (JIS order in backend): {prefecture_options[:10]} ... total {len(prefecture_options)-1}")
-    # Keep reference for validation
-    prefectures: List[str] = prefecture_options
-
     # Municipality dropdown helper - must be inside dashboard_page to access df
     def get_municipality_options(pref_value: str) -> List[str]:
         if pref_value == "全国" or "municipality" not in df.columns:
@@ -600,9 +705,6 @@ def dashboard_page() -> None:
         options = ["すべて"] + sorted(muni_list)
         log(f"[DATA] Municipality options for {pref_value}: {options[:10]} ... total {len(options)-1}")
         return options
-
-    state = app.storage.user
-    state.setdefault("tab", "overview")
 
     # ensure prefecture is valid; fallback to first actual pref if available
     current_pref = state.get("prefecture")
@@ -623,19 +725,6 @@ def dashboard_page() -> None:
                 state["municipality"] = munis[0]
     else:
         state["municipality"] = "すべて"
-
-    # Header
-    with ui.header().style(f"background-color: {BG_COLOR}; border-bottom: 1px solid {BORDER_COLOR}"):
-        ui.label("job_ap_analyzer_gui").classes("text-xl font-bold").style(f"color: {TEXT_COLOR}")
-        ui.space()
-        ui.label(f"ログイン: {get_user_email()}").classes("text-sm").style(f"color: {MUTED_COLOR}")
-
-        def handle_logout() -> None:
-            app.storage.user["authenticated"] = False
-            app.storage.user["email"] = ""
-            ui.navigate.to("/login")
-
-        ui.button("ログアウト", on_click=handle_logout).props("flat").style(f"color: {TEXT_COLOR}")
 
     # Filters
     def get_filtered_data() -> pd.DataFrame:
@@ -1478,6 +1567,142 @@ def dashboard_page() -> None:
                     with result_container:
                         ui.label("条件を選択して検索してください").style(f"color: {MUTED_COLOR}")
 
+                # ----- 10行目: 緊急度×性別クロス分析（URGENCY_GENDER） -----
+                ui.label("🚨 緊急度×性別クロス分析").classes("text-sm font-semibold mt-6 mb-3").style(f"color: {TEXT_COLOR}")
+
+                with ui.card().classes("w-full").style(
+                    f"background-color: {CARD_BG}; border: 1px solid {BORDER_COLOR}; padding: 16px"
+                ):
+                    ui.label("性別ごとの転職緊急度を分析（棒グラフ: 人数、折れ線: 平均スコア）").classes("text-xs mb-3").style(f"color: {MUTED_COLOR}")
+
+                    urgency_gender_data = get_urgency_gender_data(pref_val, muni_val)
+                    if urgency_gender_data:
+                        labels = [item["gender"] for item in urgency_gender_data]
+                        counts = [item["count"] for item in urgency_gender_data]
+                        avg_scores = [round(item["avg_score"], 2) for item in urgency_gender_data]
+
+                        # 2軸グラフ: 棒グラフ（人数）+ 折れ線（平均スコア）
+                        ui.echart({
+                            "backgroundColor": "transparent",
+                            "tooltip": {
+                                "trigger": "axis",
+                                "axisPointer": {"type": "cross"}
+                            },
+                            "legend": {"data": ["人数", "平均スコア"], "textStyle": {"color": MUTED_COLOR}},
+                            "xAxis": {
+                                "type": "category",
+                                "data": labels,
+                                "axisLabel": {"color": MUTED_COLOR}
+                            },
+                            "yAxis": [
+                                {
+                                    "type": "value",
+                                    "name": "人数",
+                                    "position": "left",
+                                    "axisLabel": {"color": MUTED_COLOR}
+                                },
+                                {
+                                    "type": "value",
+                                    "name": "平均スコア",
+                                    "position": "right",
+                                    "min": 0,
+                                    "max": 5,
+                                    "axisLabel": {"color": MUTED_COLOR}
+                                }
+                            ],
+                            "series": [
+                                {
+                                    "name": "人数",
+                                    "type": "bar",
+                                    "data": counts,
+                                    "yAxisIndex": 0,
+                                    "itemStyle": {"color": PRIMARY_COLOR},
+                                    "label": {"show": True, "position": "top", "color": TEXT_COLOR}
+                                },
+                                {
+                                    "name": "平均スコア",
+                                    "type": "line",
+                                    "data": avg_scores,
+                                    "yAxisIndex": 1,
+                                    "itemStyle": {"color": "#ef4444"},
+                                    "lineStyle": {"width": 3},
+                                    "symbol": "circle",
+                                    "symbolSize": 10,
+                                    "label": {"show": True, "position": "top", "color": "#ef4444"}
+                                }
+                            ]
+                        }).classes("w-full h-80")
+                    else:
+                        ui.label("緊急度×性別データがありません").style(f"color: {MUTED_COLOR}")
+
+                # ----- 11行目: 転職希望時期別緊急度（URGENCY_START_CATEGORY） -----
+                ui.label("📅 転職希望時期別緊急度").classes("text-sm font-semibold mt-6 mb-3").style(f"color: {TEXT_COLOR}")
+
+                with ui.card().classes("w-full").style(
+                    f"background-color: {CARD_BG}; border: 1px solid {BORDER_COLOR}; padding: 16px"
+                ):
+                    ui.label("転職希望時期ごとの緊急度を分析（棒グラフ: 人数、折れ線: 平均スコア）").classes("text-xs mb-3").style(f"color: {MUTED_COLOR}")
+
+                    urgency_start_data = get_urgency_start_category_data(pref_val, muni_val)
+                    if urgency_start_data:
+                        labels_start = [item["category"] for item in urgency_start_data]
+                        counts_start = [item["count"] for item in urgency_start_data]
+                        avg_scores_start = [round(item["avg_score"], 2) for item in urgency_start_data]
+
+                        # 2軸グラフ: 棒グラフ（人数）+ 折れ線（平均スコア）
+                        ui.echart({
+                            "backgroundColor": "transparent",
+                            "tooltip": {
+                                "trigger": "axis",
+                                "axisPointer": {"type": "cross"}
+                            },
+                            "legend": {"data": ["人数", "平均スコア"], "textStyle": {"color": MUTED_COLOR}},
+                            "xAxis": {
+                                "type": "category",
+                                "data": labels_start,
+                                "axisLabel": {"color": MUTED_COLOR, "rotate": 15}
+                            },
+                            "yAxis": [
+                                {
+                                    "type": "value",
+                                    "name": "人数",
+                                    "position": "left",
+                                    "axisLabel": {"color": MUTED_COLOR}
+                                },
+                                {
+                                    "type": "value",
+                                    "name": "平均スコア",
+                                    "position": "right",
+                                    "min": 0,
+                                    "max": 5,
+                                    "axisLabel": {"color": MUTED_COLOR}
+                                }
+                            ],
+                            "series": [
+                                {
+                                    "name": "人数",
+                                    "type": "bar",
+                                    "data": counts_start,
+                                    "yAxisIndex": 0,
+                                    "itemStyle": {"color": "#10b981"},
+                                    "label": {"show": True, "position": "top", "color": TEXT_COLOR}
+                                },
+                                {
+                                    "name": "平均スコア",
+                                    "type": "line",
+                                    "data": avg_scores_start,
+                                    "yAxisIndex": 1,
+                                    "itemStyle": {"color": "#f59e0b"},
+                                    "lineStyle": {"width": 3},
+                                    "symbol": "circle",
+                                    "symbolSize": 10,
+                                    "label": {"show": True, "position": "top", "color": "#f59e0b"}
+                                }
+                            ]
+                        }).classes("w-full h-80")
+                    else:
+                        ui.label("転職希望時期データがありません").style(f"color: {MUTED_COLOR}")
+
             elif tab == "mobility":
                 ui.label("🗺️ 地域・移動パターン").classes("text-xl font-bold mb-4").style(f"color: {TEXT_COLOR}")
 
@@ -1957,7 +2182,8 @@ def dashboard_page() -> None:
                     get_workstyle_gender_cross,
                     get_workstyle_urgency_cross,
                     get_workstyle_employment_cross,
-                    get_workstyle_area_count_cross
+                    get_workstyle_area_count_cross,
+                    get_workstyle_mobility_summary
                 )
 
                 pref = state["prefecture"] if state["prefecture"] != "全国" else None
@@ -2135,6 +2361,105 @@ def dashboard_page() -> None:
                         else:
                             ui.label("データなし").style(f"color: {MUTED_COLOR}")
 
+                # === 雇用形態×移動パターン分析（WORKSTYLE_MOBILITY） ===
+                mobility_data = get_workstyle_mobility_summary(pref, muni)
+
+                with ui.card().classes("w-full p-4 mt-4").style(
+                    f"background-color: {CARD_BG}; border: 1px solid {BORDER_COLOR}; border-radius: 12px"
+                ):
+                    ui.label("雇用形態 × 移動パターン").classes("text-lg font-bold mb-2").style(f"color: {TEXT_COLOR}")
+                    ui.label("希望勤務地からの移動距離傾向を雇用形態別に分析").style(f"color: {MUTED_COLOR}; font-size: 0.85rem; margin-bottom: 12px")
+
+                    if mobility_data.get("heatmap") and any(any(row) for row in mobility_data["heatmap"]):
+                        with ui.row().classes("w-full gap-4"):
+                            # ヒートマップ
+                            with ui.element("div").classes("flex-1"):
+                                heatmap_data = []
+                                workstyles = mobility_data.get("workstyles", ["正職員", "パート", "その他"])
+                                mobilities = mobility_data.get("mobilities", ["地元志向", "近隣移動", "中距離移動", "遠距離移動"])
+
+                                for i, ws in enumerate(workstyles):
+                                    for j, mob in enumerate(mobilities):
+                                        val = mobility_data["heatmap"][i][j] if i < len(mobility_data["heatmap"]) and j < len(mobility_data["heatmap"][i]) else 0
+                                        heatmap_data.append([j, i, val])
+
+                                max_val = max(d[2] for d in heatmap_data) if heatmap_data else 1
+
+                                nicegui_ui.echart({
+                                    "tooltip": {
+                                        "position": "top",
+                                        "formatter": "{c}人"
+                                    },
+                                    "grid": {"left": "15%", "right": "10%", "bottom": "15%", "top": "5%"},
+                                    "xAxis": {
+                                        "type": "category",
+                                        "data": mobilities,
+                                        "axisLabel": {"color": TEXT_COLOR, "rotate": 20, "fontSize": 10}
+                                    },
+                                    "yAxis": {
+                                        "type": "category",
+                                        "data": workstyles,
+                                        "axisLabel": {"color": TEXT_COLOR}
+                                    },
+                                    "visualMap": {
+                                        "min": 0,
+                                        "max": max_val,
+                                        "calculable": True,
+                                        "orient": "horizontal",
+                                        "left": "center",
+                                        "bottom": "0%",
+                                        "inRange": {"color": ["#1a237e", "#303f9f", "#3f51b5", "#7986cb", "#c5cae9"]},
+                                        "textStyle": {"color": TEXT_COLOR}
+                                    },
+                                    "series": [{
+                                        "name": "人数",
+                                        "type": "heatmap",
+                                        "data": heatmap_data,
+                                        "label": {"show": True, "color": "#fff", "fontSize": 10}
+                                    }]
+                                }).classes("w-full").style("height: 250px")
+
+                            # 移動パターン別人数棒グラフ
+                            with ui.element("div").classes("flex-1"):
+                                by_mobility = mobility_data.get("by_mobility", [])
+                                if by_mobility:
+                                    mob_colors = {
+                                        "地元志向": "#4CAF50",
+                                        "近隣移動": "#2196F3",
+                                        "中距離移動": "#FF9800",
+                                        "遠距離移動": "#F44336"
+                                    }
+                                    nicegui_ui.echart({
+                                        "tooltip": {"trigger": "axis", "axisPointer": {"type": "shadow"}},
+                                        "grid": {"left": "5%", "right": "5%", "bottom": "10%", "top": "10%", "containLabel": True},
+                                        "xAxis": {
+                                            "type": "category",
+                                            "data": [d["mobility"] for d in by_mobility],
+                                            "axisLabel": {"color": TEXT_COLOR, "rotate": 20, "fontSize": 10}
+                                        },
+                                        "yAxis": {"type": "value", "axisLabel": {"color": TEXT_COLOR}},
+                                        "series": [{
+                                            "type": "bar",
+                                            "data": [
+                                                {"value": d["count"], "itemStyle": {"color": mob_colors.get(d["mobility"], "#666")}}
+                                                for d in by_mobility
+                                            ],
+                                            "label": {"show": True, "position": "top", "color": TEXT_COLOR, "fontSize": 10}
+                                        }]
+                                    }).classes("w-full").style("height: 250px")
+
+                        # KPIサマリー
+                        with ui.row().classes("w-full gap-4 mt-4"):
+                            for ws_data in mobility_data.get("by_workstyle", [])[:3]:
+                                with ui.card().classes("flex-1 p-3").style(
+                                    f"background-color: {PANEL_BG}; border: 1px solid {BORDER_COLOR}; border-radius: 8px; text-align: center"
+                                ):
+                                    ui.label(ws_data["workstyle"]).style(f"color: {TEXT_COLOR}; font-weight: bold; font-size: 0.9rem")
+                                    ui.label(f"{ws_data['count']:,}人").style(f"color: {PRIMARY_COLOR}; font-size: 1.2rem; font-weight: bold")
+                                    ui.label(f"平均移動 {ws_data['avg_distance']}km").style(f"color: {MUTED_COLOR}; font-size: 0.8rem")
+                    else:
+                        ui.label("WORKSTYLE_MOBILITYデータなし（Tursoへのインポートが必要です）").style(f"color: {MUTED_COLOR}")
+
                 # 統計的解説
                 with ui.card().classes("w-full p-4 mt-4").style(
                     f"background-color: {CARD_BG}; border: 1px solid {BORDER_COLOR}; border-radius: 12px"
@@ -2161,7 +2486,7 @@ def dashboard_page() -> None:
                 # 説明パネル
                 with ui.card().classes("w-full mb-4").style(f"background-color: {PANEL_BG}; border: 1px solid {BORDER_COLOR}"):
                     with ui.card_section():
-                        ui.label("⚠️ Googleのセキュリティ制限により、求人地図は新しいタブで開きます").style(f"color: {MUTED_COLOR}; font-size: 0.9rem;")
+                        ui.label("Googleのセキュリティ制限により、求人地図は新しいタブで開きます").style(f"color: {MUTED_COLOR}; font-size: 0.9rem;")
                         ui.label("下のボタンをクリックすると、求人地図が新しいタブで表示されます。").style(f"color: {TEXT_COLOR}; font-size: 0.85rem; margin-top: 8px;")
 
                 # 職種選択
@@ -2181,7 +2506,7 @@ def dashboard_page() -> None:
 
                     # 新しいタブで開くボタン
                     ui.button(
-                        "🗺️ 求人地図を開く",
+                        "求人地図を開く",
                         on_click=lambda: ui.run_javascript(f'window.open("{gas_urls[current_job]}", "_blank")')
                     ).classes("bg-blue-600 text-white px-6 py-2").props("unelevated")
 
@@ -2190,16 +2515,504 @@ def dashboard_page() -> None:
                     with ui.card_section():
                         ui.label("求人地図の機能").classes("font-bold mb-2").style(f"color: {TEXT_COLOR}")
                         for feature in [
-                            "📍 全国の介護求人をマップ上に表示",
-                            "🔍 都道府県・市区町村でフィルタリング",
-                            "💰 給与条件での絞り込み",
-                            "📊 求人数のヒートマップ表示",
+                            "全国の介護求人をマップ上に表示",
+                            "都道府県・市区町村でフィルタリング",
+                            "給与条件での絞り込み",
+                            "求人数のヒートマップ表示",
                         ]:
                             ui.label(feature).style(f"color: {MUTED_COLOR}; font-size: 0.85rem; margin-bottom: 4px")
 
-    # Tabs（Reflexと同じ日本語タブ名）
-    tab_names = ["📊 市場概況", "👥 人材属性", "🗺️ 地域・移動パターン", "⚖️ 需給バランス", "📈 雇用形態分析", "🗺️ 求人地図"]
-    tab_ids = ["overview", "demographics", "mobility", "balance", "workstyle", "jobmap"]
+            elif tab == "talentmap":
+                # === 人材地図タブ（Leaflet統合版 + 高度分析） ===
+                ui.label("人材地図").classes("text-xl font-bold mb-4").style(f"color: {TEXT_COLOR}")
+
+                from db_helper import get_map_markers, get_flow_lines
+
+                pref = state["prefecture"] if state["prefecture"] != "全国" else None
+
+                # === フィルタUI（Step 1） ===
+                # フィルタ値の初期化（永続化のため）
+                if "talentmap_workstyle" not in state:
+                    state["talentmap_workstyle"] = "全て"
+                if "talentmap_age" not in state:
+                    state["talentmap_age"] = "全て"
+                if "talentmap_gender" not in state:
+                    state["talentmap_gender"] = "全て"
+                if "talentmap_mode" not in state:
+                    state["talentmap_mode"] = "基本表示"
+                if "talentmap_show_markers" not in state:
+                    state["talentmap_show_markers"] = True
+                if "talentmap_show_flows" not in state:
+                    state["talentmap_show_flows"] = False
+                if "talentmap_show_polygons" not in state:
+                    state["talentmap_show_polygons"] = True  # デフォルトでポリゴン表示ON
+
+                def update_filter(key, value):
+                    state[key] = value
+                    show_content.refresh()
+
+                with ui.card().classes("w-full mb-4 p-4").style(
+                    f"background-color: {PANEL_BG}; border: 1px solid {BORDER_COLOR}; border-radius: 8px"
+                ):
+                    # フィルタ行1: 属性フィルタ
+                    with ui.row().classes("w-full gap-4 items-center flex-wrap"):
+                        ui.label("フィルタ:").style(f"color: {TEXT_COLOR}; font-weight: bold")
+
+                        workstyle_filter = ui.select(
+                            ["全て", "正職員", "パート", "その他"],
+                            value=state["talentmap_workstyle"],
+                            label="雇用区分",
+                            on_change=lambda e: update_filter("talentmap_workstyle", e.value)
+                        ).classes("w-32").style(f"color: {TEXT_COLOR}")
+
+                        age_filter = ui.select(
+                            ["全て", "20代", "30代", "40代", "50代以上"],
+                            value=state["talentmap_age"],
+                            label="年代",
+                            on_change=lambda e: update_filter("talentmap_age", e.value)
+                        ).classes("w-32").style(f"color: {TEXT_COLOR}")
+
+                        gender_filter = ui.select(
+                            ["全て", "男性", "女性"],
+                            value=state["talentmap_gender"],
+                            label="性別",
+                            on_change=lambda e: update_filter("talentmap_gender", e.value)
+                        ).classes("w-24").style(f"color: {TEXT_COLOR}")
+
+                    ui.separator().classes("my-2")
+
+                    # フィルタ行2: 表示モード
+                    with ui.row().classes("w-full gap-4 items-center flex-wrap"):
+                        ui.label("表示モード:").style(f"color: {TEXT_COLOR}; font-weight: bold")
+
+                        display_mode = ui.radio(
+                            ["基本表示", "流入元", "流出/流入バランス", "競合地域"],
+                            value=state["talentmap_mode"],
+                            on_change=lambda e: update_filter("talentmap_mode", e.value)
+                        ).props("inline").style(f"color: {TEXT_COLOR}")
+
+                    ui.separator().classes("my-2")
+
+                    # フィルタ行3: 地図コントロール
+                    with ui.row().classes("w-full gap-4 items-center"):
+                        ui.checkbox("ポリゴン表示", value=state["talentmap_show_polygons"], on_change=lambda e: update_filter("talentmap_show_polygons", e.value)).style(f"color: {TEXT_COLOR}")
+                        ui.checkbox("マーカー表示", value=state["talentmap_show_markers"], on_change=lambda e: update_filter("talentmap_show_markers", e.value)).style(f"color: {TEXT_COLOR}")
+                        ui.checkbox("フロー表示", value=state["talentmap_show_flows"], on_change=lambda e: update_filter("talentmap_show_flows", e.value)).style(f"color: {TEXT_COLOR}")
+
+                # 追加関数インポート
+                from db_helper import get_inflow_sources, get_flow_balance, get_competing_areas
+
+                # フィルタ値取得（stateから読み込み）
+                ws_val = state["talentmap_workstyle"] if state["talentmap_workstyle"] != "全て" else None
+                age_val = state["talentmap_age"] if state["talentmap_age"] != "全て" else None
+                gender_val = state["talentmap_gender"] if state["talentmap_gender"] != "全て" else None
+                mode_val = state["talentmap_mode"]
+
+                # Leaflet地図
+                with ui.card().classes("w-full").style(
+                    f"background-color: {CARD_BG}; border: 1px solid {BORDER_COLOR}; border-radius: 12px; overflow: hidden"
+                ):
+                    japan_center = (36.5, 138.0)
+                    zoom_level = 5 if not pref else 8
+
+                    # 地図コンテナ（position: relative はポリゴンSVGオーバーレイに必要）
+                    map_container = ui.element("div").classes("w-full").style("height: 500px; position: relative;")
+                    with map_container:
+                        map_widget = ui.leaflet(center=japan_center, zoom=zoom_level)
+                        map_widget.classes("w-full h-full")
+
+                    # マーカーデータ取得
+                    markers_data = get_map_markers(pref)
+
+                    # === GeoJSONポリゴン表示（choropleth）===
+                    polygon_stats = {"total": 0, "with_data": 0, "max_count": 0}  # 凡例用統計
+                    geojson_data_for_click = None  # マップクリック用にGeoJSONを保持
+
+                    if state["talentmap_show_polygons"] and pref and _CHOROPLETH_AVAILABLE:
+                        geojson_data = load_geojson(pref)
+                        if geojson_data:
+                            geojson_data_for_click = geojson_data  # クリックハンドラ用に保持
+
+                            # マーカーデータから市区町村別データを作成
+                            # （generate_name_variants関数はモジュールレベルで定義済み）
+
+                            # Step 1: GeoJSONの全市区町村を0で初期化（100%マッチ率を保証）
+                            municipality_data = {}
+                            for feature in geojson_data.get("features", []):
+                                geojson_name = feature.get("properties", {}).get("N03_004", "")
+                                if geojson_name:
+                                    municipality_data[geojson_name] = {
+                                        'count': 0,
+                                        'inflow': 0,
+                                        'outflow': 0,
+                                        'competition': 0,
+                                    }
+
+                            # Step 2: 実際のマーカーデータで上書き
+                            if markers_data:
+                                for m in markers_data:
+                                    muni_name = m.get('municipality', '')
+                                    if muni_name:
+                                        data_entry = {
+                                            'count': m.get('count', 0),
+                                            'inflow': m.get('inflow', 0),
+                                            'outflow': m.get('outflow', 0),
+                                            'competition': m.get('competition', 0),
+                                        }
+                                        # 全ての名前変換候補を登録
+                                        for variant in generate_name_variants(muni_name):
+                                            municipality_data[variant] = data_entry
+
+                            # モードに応じたスタイルモード
+                            style_mode = "count"
+                            if mode_val == "流入元":
+                                style_mode = "inflow"
+                            elif mode_val == "流出/流入バランス":
+                                style_mode = "balance"
+                            elif mode_val == "競合地域":
+                                style_mode = "competition"
+
+                            # 選択中の市区町村（変換候補も含めたセットを作成）
+                            selected_muni_raw = state.get("municipality") if state.get("municipality") != "すべて" else None
+                            selected_muni_variants = set(generate_name_variants(selected_muni_raw)) if selected_muni_raw else set()
+
+                            # 最大値計算
+                            max_count = max((d.get('count', 0) for d in municipality_data.values()), default=1)
+                            max_inflow = max((d.get('inflow', 0) for d in municipality_data.values()), default=1)
+                            max_competition = max((d.get('competition', 0) for d in municipality_data.values()), default=1)
+
+                            # 凡例用統計を更新
+                            polygon_stats["max_count"] = max_count
+                            polygon_stats["total"] = len(geojson_data.get("features", []))
+                            polygon_stats["with_data"] = len(municipality_data)
+
+                            # GeoJSONの各featureをポリゴンとして追加
+                            polygon_count = 0
+                            for feature in geojson_data.get("features", []):
+                                props = feature.get("properties", {})
+                                muni_name = props.get("N03_004", "")
+                                geometry = feature.get("geometry", {})
+
+                                # 色とスタイルを計算
+                                data = municipality_data.get(muni_name, {})
+                                if style_mode == "count":
+                                    value = data.get("count", 0)
+                                    max_val = max_count
+                                elif style_mode == "inflow":
+                                    value = data.get("inflow", 0)
+                                    max_val = max_inflow
+                                elif style_mode == "balance":
+                                    inflow = data.get("inflow", 0)
+                                    outflow = data.get("outflow", 0)
+                                    value = inflow - outflow + 50
+                                    max_val = 100
+                                else:  # competition
+                                    value = data.get("competition", 0)
+                                    max_val = max_competition
+
+                                # 選択中の市区町村を強調（変換候補もチェック）
+                                if selected_muni_variants and muni_name in selected_muni_variants:
+                                    fill_color = "#00d4ff"  # シアン
+                                    border_color = "#ffffff"
+                                    fill_opacity = 0.8
+                                    border_weight = 3
+                                else:
+                                    fill_color = get_color_by_value(value, max_val, style_mode)
+                                    border_color = "#ffffff"
+                                    fill_opacity = 0.6
+                                    border_weight = 1
+
+                                # ポリゴンを追加
+                                if geometry.get("type") == "Polygon":
+                                    coords = geometry["coordinates"][0]
+                                    latlngs = [[c[1], c[0]] for c in coords]
+                                    map_widget.generic_layer(
+                                        name="polygon",
+                                        args=[latlngs, {
+                                            "color": border_color,
+                                            "fillColor": fill_color,
+                                            "fillOpacity": fill_opacity,
+                                            "weight": border_weight
+                                        }]
+                                    )
+                                    polygon_count += 1
+                                elif geometry.get("type") == "MultiPolygon":
+                                    for polygon in geometry["coordinates"]:
+                                        coords = polygon[0]
+                                        latlngs = [[c[1], c[0]] for c in coords]
+                                        map_widget.generic_layer(
+                                            name="polygon",
+                                            args=[latlngs, {
+                                                "color": border_color,
+                                                "fillColor": fill_color,
+                                                "fillOpacity": fill_opacity,
+                                                "weight": border_weight
+                                            }]
+                                        )
+                                        polygon_count += 1
+
+                            # マッチ統計を計算
+                            total_features = len(geojson_data.get("features", []))
+                            # 名前マッチ: GeoJSON名がmunicipality_dataに存在するか
+                            name_matched = sum(1 for f in geojson_data.get("features", [])
+                                               if f.get("properties", {}).get("N03_004", "") in municipality_data)
+                            # データあり: count > 0
+                            with_data = sum(1 for f in geojson_data.get("features", [])
+                                            if municipality_data.get(f.get("properties", {}).get("N03_004", ""), {}).get("count", 0) > 0)
+                            name_rate = (name_matched / total_features * 100) if total_features > 0 else 0
+                            data_rate = (with_data / total_features * 100) if total_features > 0 else 0
+                            print(f"[CHOROPLETH] Rendered {polygon_count} polygons for {pref} (name_match={name_matched}/{total_features}={name_rate:.1f}%, with_data={with_data}/{total_features}={data_rate:.1f}%, max={max_count})")
+
+                            # 都道府県の中心にズーム
+                            pref_center = get_pref_center(pref)
+                            map_widget.set_center(pref_center)
+                            map_widget.set_zoom(9)
+
+                    # マップクリックハンドラ（ポリゴンクリックで市区町村選択）
+                    def on_map_click(e):
+                        if geojson_data_for_click:
+                            lat = e.args.get("latlng", {}).get("lat")
+                            lng = e.args.get("latlng", {}).get("lng")
+                            if lat and lng:
+                                clicked_muni = find_municipality_at_point(lat, lng, geojson_data_for_click)
+                                if clicked_muni and clicked_muni != state.get("municipality"):
+                                    print(f"[CHOROPLETH] Clicked: {clicked_muni} at ({lat}, {lng})")
+                                    state["municipality"] = clicked_muni
+                                    show_content.refresh()
+
+                    map_widget.on("map-click", on_map_click)
+
+                    # 基本マーカー表示
+                    legend_items = []
+                    data_summary = []
+
+                    if mode_val == "基本表示":
+                        # 基本表示: マーカーとフロー
+                        if markers_data and state["talentmap_show_markers"]:
+                            for m in markers_data[:200]:
+                                # マーカー追加（サイズは人数に比例、透明度低めでポリゴン見やすく）
+                                radius = min(max(m['count'] / 50, 4), 12)
+                                map_widget.generic_layer(
+                                    name='circleMarker',
+                                    args=[[m['lat'], m['lng']], {
+                                        'radius': radius,
+                                        'color': '#ffffff',      # 白い枠線
+                                        'weight': 1,             # 枠線の太さ
+                                        'fillColor': '#3b82f6',  # 青い塗りつぶし
+                                        'fillOpacity': 0.5       # 透明度を下げてポリゴン可視性向上
+                                    }]
+                                )
+
+                        if state["talentmap_show_flows"]:
+                            flows_data = get_flow_lines(pref)
+                            for flow in flows_data[:50]:
+                                weight = min(max(flow['count'] / 100, 1), 8)
+                                map_widget.generic_layer(
+                                    name='polyline',
+                                    args=[[[(flow['from_lat'], flow['from_lng']), (flow['to_lat'], flow['to_lng'])]], {'color': '#3b82f6', 'weight': weight, 'opacity': 0.6}]
+                                )
+
+                        legend_items = ["マーカー: 市区町村の求職者数", "青線: 居住地→希望勤務地のフロー", "太い線ほど移動人数が多い"]
+                        data_summary = [f"表示マーカー: {len(markers_data) if markers_data else 0}件"]
+
+                    elif mode_val == "流入元":
+                        # 流入元可視化: 選択都道府県への流入元を色分け
+                        if pref:
+                            muni = state.get("municipality") if state.get("municipality") != "全て" else None
+                            inflow_data = get_inflow_sources(pref, muni, ws_val, age_val, gender_val)
+
+                            if inflow_data:
+                                # countの分位数計算
+                                counts = [d['count'] for d in inflow_data]
+                                max_count = max(counts) if counts else 1
+                                p90 = max_count * 0.9
+                                p70 = max_count * 0.7
+                                p40 = max_count * 0.4
+
+                                for d in inflow_data[:150]:
+                                    count = d['count']
+                                    # 色分け
+                                    if count >= p90:
+                                        color = '#ef4444'  # 赤
+                                        radius = 15
+                                    elif count >= p70:
+                                        color = '#f97316'  # オレンジ
+                                        radius = 12
+                                    elif count >= p40:
+                                        color = '#eab308'  # 黄
+                                        radius = 9
+                                    else:
+                                        color = '#9ca3af'  # 灰
+                                        radius = 6
+
+                                    map_widget.generic_layer(
+                                        name='circleMarker',
+                                        args=[[d['lat'], d['lng']], {
+                                            'radius': radius,
+                                            'color': '#ffffff',
+                                            'weight': 1,
+                                            'fillColor': color,
+                                            'fillOpacity': 0.6
+                                        }]
+                                    )
+
+                                # 選択地域をハイライト
+                                target_marker = next((m for m in markers_data if m.get('prefecture') == pref), None)
+                                if target_marker:
+                                    # 選択中の地域を緑色で強調
+                                    map_widget.generic_layer(
+                                        name='circleMarker',
+                                        args=[[target_marker['lat'], target_marker['lng']], {
+                                            'radius': 15,
+                                            'color': '#ffffff',
+                                            'weight': 2,
+                                            'fillColor': '#22c55e',
+                                            'fillOpacity': 0.9
+                                        }]
+                                    )
+
+                            legend_items = ["赤: 主要流入元（上位10%）", "オレンジ: 重要流入元", "黄: 中程度", "灰: 少数"]
+                            top3 = inflow_data[:3] if inflow_data else []
+                            top3_text = ', '.join([f"{d['source_pref']}{d['source_muni']}({d['count']}人)" for d in top3])
+                            data_summary = [f"流入元: {len(inflow_data) if inflow_data else 0}地域", f"TOP3: {top3_text}"]
+                        else:
+                            ui.label("都道府県を選択してください").style(f"color: {MUTED_COLOR}; padding: 20px")
+                            legend_items = ["都道府県を選択すると流入元が表示されます"]
+
+                    elif mode_val == "流出/流入バランス":
+                        # 流出/流入バランス: サークルマーカーで色分け
+                        balance_data = get_flow_balance(pref, ws_val, age_val, gender_val)
+
+                        if balance_data:
+                            for d in balance_data[:150]:
+                                ratio = d['ratio']
+                                # 色分け（青=流入優位、赤=流出優位）
+                                if ratio > 0.65:
+                                    color = '#1d4ed8'  # 濃い青
+                                    radius = 12
+                                elif ratio > 0.55:
+                                    color = '#60a5fa'  # 薄い青
+                                    radius = 10
+                                elif ratio > 0.45:
+                                    color = '#9ca3af'  # 灰
+                                    radius = 8
+                                elif ratio > 0.35:
+                                    color = '#f87171'  # 薄い赤
+                                    radius = 10
+                                else:
+                                    color = '#dc2626'  # 濃い赤
+                                    radius = 12
+
+                                # 流出/流入バランスを円形マーカーで表示
+                                map_widget.generic_layer(
+                                    name='circleMarker',
+                                    args=[[d['lat'], d['lng']], {
+                                        'radius': radius,
+                                        'color': '#ffffff',
+                                        'weight': 1,
+                                        'fillColor': color,
+                                        'fillOpacity': 0.6
+                                    }]
+                                )
+
+                        legend_items = ["濃青: 流入優位（>65%）", "薄青: やや流入優位", "灰: バランス", "薄赤: やや流出優位", "濃赤: 流出優位（<35%）"]
+                        inflow_areas = len([d for d in balance_data if d['ratio'] > 0.55]) if balance_data else 0
+                        outflow_areas = len([d for d in balance_data if d['ratio'] < 0.45]) if balance_data else 0
+                        data_summary = [f"流入優位: {inflow_areas}地域", f"流出優位: {outflow_areas}地域"]
+
+                    elif mode_val == "競合地域":
+                        # 競合地域可視化: 選択地域の求職者が他に希望する地域
+                        if pref:
+                            muni = state.get("municipality") if state.get("municipality") != "全て" else None
+                            competing_data = get_competing_areas(pref, muni, ws_val, age_val, gender_val)
+
+                            if competing_data:
+                                for d in competing_data[:100]:
+                                    pct = d['percentage']
+                                    # 色分け
+                                    if pct >= 20:
+                                        color = '#ef4444'  # 赤
+                                        radius = 15
+                                    elif pct >= 10:
+                                        color = '#f97316'  # オレンジ
+                                        radius = 12
+                                    elif pct >= 5:
+                                        color = '#eab308'  # 黄
+                                        radius = 9
+                                    else:
+                                        color = '#9ca3af'  # 灰
+                                        radius = 6
+
+                                    # 競合地域を円形マーカーで表示
+                                    map_widget.generic_layer(
+                                        name='circleMarker',
+                                        args=[[d['lat'], d['lng']], {
+                                            'radius': radius,
+                                            'color': '#ffffff',
+                                            'weight': 1,
+                                            'fillColor': color,
+                                            'fillOpacity': 0.6
+                                        }]
+                                    )
+
+                                # 選択地域をハイライト
+                                source_marker = next((m for m in markers_data if m.get('prefecture') == pref), None)
+                                if source_marker:
+                                    # 選択中の居住地を緑色で強調
+                                    map_widget.generic_layer(
+                                        name='circleMarker',
+                                        args=[[source_marker['lat'], source_marker['lng']], {
+                                            'radius': 15,
+                                            'color': '#ffffff',
+                                            'weight': 2,
+                                            'fillColor': '#22c55e',
+                                            'fillOpacity': 0.9
+                                        }]
+                                    )
+
+                            legend_items = ["赤: 強い競合（>20%）", "オレンジ: 中程度（10-20%）", "黄: 弱い競合（5-10%）", "灰: ほぼ競合なし"]
+                            top3 = competing_data[:3] if competing_data else []
+                            top3_text = ', '.join([f"{d['target_pref']}({d['percentage']:.1f}%)" for d in top3])
+                            data_summary = [f"競合地域: {len(competing_data) if competing_data else 0}地域", f"TOP3: {top3_text}"]
+                        else:
+                            ui.label("都道府県を選択してください（居住地として分析）").style(f"color: {MUTED_COLOR}; padding: 20px")
+                            legend_items = ["都道府県を選択すると競合地域が表示されます"]
+
+                # 凡例・統計（動的更新対応）
+                with ui.row().classes("w-full gap-4 mt-4"):
+                    with ui.card().classes("flex-1 p-4").style(f"background-color: {PANEL_BG}; border: 1px solid {BORDER_COLOR}; border-radius: 8px"):
+                        ui.label(f"凡例（{mode_val}）").classes("font-bold mb-2").style(f"color: {TEXT_COLOR}")
+                        # ポリゴン表示時の動的凡例
+                        if state["talentmap_show_polygons"] and pref:
+                            if mode_val == "基本表示":
+                                ui.label("🗺️ ポリゴン色: 求職者数（赤=多い、緑=少ない）").style(f"color: {MUTED_COLOR}; font-size: 0.85rem")
+                            elif mode_val == "流入元":
+                                ui.label("🗺️ ポリゴン色: 流入数（緑=多い）").style(f"color: {MUTED_COLOR}; font-size: 0.85rem")
+                            elif mode_val == "流出/流入バランス":
+                                ui.label("🗺️ ポリゴン色: 青=流入優位 / 赤=流出優位").style(f"color: {MUTED_COLOR}; font-size: 0.85rem")
+                            elif mode_val == "競合地域":
+                                ui.label("🗺️ ポリゴン色: 競合度（マゼンタ=高い）").style(f"color: {MUTED_COLOR}; font-size: 0.85rem")
+                            ui.label("🖱️ クリックで市区町村を選択").style(f"color: {MUTED_COLOR}; font-size: 0.85rem")
+                            ui.label("💡 ホバーで詳細表示").style(f"color: {MUTED_COLOR}; font-size: 0.85rem")
+                        for item in legend_items:
+                            ui.label(item).style(f"color: {MUTED_COLOR}; font-size: 0.85rem")
+
+                    with ui.card().classes("flex-1 p-4").style(f"background-color: {PANEL_BG}; border: 1px solid {BORDER_COLOR}; border-radius: 8px"):
+                        ui.label("データ概要").classes("font-bold mb-2").style(f"color: {TEXT_COLOR}")
+                        # ポリゴン統計情報
+                        if state["talentmap_show_polygons"] and polygon_stats["total"] > 0:
+                            ui.label(f"市区町村数: {polygon_stats['total']}").style(f"color: {MUTED_COLOR}; font-size: 0.85rem")
+                            ui.label(f"データあり: {polygon_stats['with_data']}").style(f"color: {MUTED_COLOR}; font-size: 0.85rem")
+                            ui.label(f"最大値: {polygon_stats['max_count']}人").style(f"color: {MUTED_COLOR}; font-size: 0.85rem")
+                        for item in data_summary:
+                            ui.label(item).style(f"color: {MUTED_COLOR}; font-size: 0.85rem")
+                        if markers_data:
+                            total_count = sum(m['count'] for m in markers_data)
+                            ui.label(f"総求職者数: {total_count:,}人").style(f"color: {MUTED_COLOR}; font-size: 0.85rem")
+
+    # Tabs
+    tab_names = ["📊 市場概況", "👥 人材属性", "🗺️ 地域・移動パターン", "⚖️ 需給バランス", "📈 雇用形態分析", "🗺️ 求人地図", "📍 人材地図"]
+    tab_ids = ["overview", "demographics", "mobility", "balance", "workstyle", "jobmap", "talentmap"]
 
     with ui.row().classes("w-full justify-center gap-2 mb-4 p-2").style(f"background-color: {PANEL_BG}"):
         tab_buttons = []
@@ -2235,7 +3048,7 @@ def dashboard_page() -> None:
 # Entrypoint
 # ---------------------------------------------------------------------
 if __name__ in {"__main__", "__mp_main__"}:
-    port = int(os.getenv("PORT", 9090))
+    port = int(os.getenv("PORT", 9099))
     is_production = os.getenv("RENDER") is not None or os.getenv("PORT") is not None
     storage_secret = os.getenv("NICEGUI_STORAGE_SECRET", "nicegui_mapcomplete_secret_key_2025")
 
@@ -2246,8 +3059,10 @@ if __name__ in {"__main__", "__mp_main__"}:
         title="job_ap_analyzer_gui",
         host="0.0.0.0",
         port=port,
-        reload=not is_production,
+        reload=False,  # 一時的にreloadを無効化
         storage_secret=storage_secret,
         show=False,
         reconnect_timeout=30.0,
+        show_welcome_message=False,
     )
+    # Note: NiceGUI shows tracebacks in console by default

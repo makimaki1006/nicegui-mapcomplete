@@ -2926,6 +2926,791 @@ def get_workstyle_summary_stats(prefecture: str = None, municipality: str = None
         return {}
 
 
+def get_urgency_gender_data(prefecture: str = None, municipality: str = None) -> list:
+    """緊急度×性別のデータを取得
+
+    Returns:
+        list: [{"gender": "女性", "count": 500, "avg_score": 3.5}, ...]
+    """
+    try:
+        print(f"[DB] get_urgency_gender_data called: pref={prefecture}, muni={municipality}")
+        if USE_CSV_MODE:
+            df = _load_csv_data()
+            print(f"[DB] CSV loaded: {len(df)} rows, row_types: {df['row_type'].unique()[:10].tolist() if 'row_type' in df.columns else 'no row_type column'}")
+            filtered = df[df['row_type'] == 'URGENCY_GENDER']
+            print(f"[DB] URGENCY_GENDER filtered: {len(filtered)} rows")
+        else:
+            sql = "SELECT * FROM job_seeker_data WHERE row_type = 'URGENCY_GENDER'"
+            filtered = query_df(sql)
+
+        if filtered.empty:
+            print(f"[DB] URGENCY_GENDER: No data after row_type filter")
+            return []
+
+        # フィルタリング
+        print(f"[DB] URGENCY_GENDER before pref filter: {len(filtered)} rows")
+        print(f"[DB] URGENCY_GENDER unique prefectures: {filtered['prefecture'].unique()[:5].tolist()}")
+        if prefecture:
+            filtered = filtered[filtered['prefecture'] == prefecture]
+            print(f"[DB] URGENCY_GENDER after pref={prefecture} filter: {len(filtered)} rows")
+        # "None"文字列や"すべて"もスキップ
+        if municipality and municipality not in (None, "None", "すべて", ""):
+            filtered = filtered[filtered['municipality'] == municipality]
+            print(f"[DB] URGENCY_GENDER after muni={municipality} filter: {len(filtered)} rows")
+
+        if filtered.empty:
+            print(f"[DB] URGENCY_GENDER: No data after prefecture/municipality filter")
+            return []
+
+        # 集計（category2 = 性別、count = 人数、avg_urgency_score = 平均スコア）
+        result = []
+        grouped = filtered.groupby('category2', observed=True).agg({
+            'count': 'sum',
+            'avg_urgency_score': 'mean'
+        }).reset_index()
+
+        for _, row in grouped.iterrows():
+            gender = str(row['category2']).strip()
+            count = row['count']
+            avg_score = row['avg_urgency_score']
+
+            if gender and pd.notna(count):
+                result.append({
+                    "gender": gender,
+                    "count": int(count) if pd.notna(count) else 0,
+                    "avg_score": round(float(avg_score), 2) if pd.notna(avg_score) else 0
+                })
+
+        # 性別順にソート（女性、男性）
+        gender_order = {"女性": 1, "男性": 2}
+        result.sort(key=lambda x: gender_order.get(x["gender"], 99))
+
+        return result
+
+    except Exception as e:
+        print(f"[DB] get_urgency_gender_data error: {e}")
+        return []
+
+
+def get_urgency_start_category_data(prefecture: str = None, municipality: str = None) -> list:
+    """緊急度×転職希望時期のデータを取得
+
+    Returns:
+        list: [{"category": "今すぐ", "count": 500, "avg_score": 5.0}, ...]
+    """
+    try:
+        if USE_CSV_MODE:
+            df = _load_csv_data()
+            filtered = df[df['row_type'] == 'URGENCY_START_CATEGORY']
+        else:
+            sql = "SELECT * FROM job_seeker_data WHERE row_type = 'URGENCY_START_CATEGORY'"
+            filtered = query_df(sql)
+
+        if filtered.empty:
+            return []
+
+        # フィルタリング
+        if prefecture:
+            filtered = filtered[filtered['prefecture'] == prefecture]
+        # "None"文字列や"すべて"もスキップ
+        if municipality and municipality not in (None, "None", "すべて", ""):
+            filtered = filtered[filtered['municipality'] == municipality]
+
+        if filtered.empty:
+            return []
+
+        # 集計（category2 = 転職希望時期、count = 人数、avg_urgency_score = 平均スコア）
+        result = []
+        grouped = filtered.groupby('category2', observed=True).agg({
+            'count': 'sum',
+            'avg_urgency_score': 'mean'
+        }).reset_index()
+
+        for _, row in grouped.iterrows():
+            category = str(row['category2']).strip()
+            count = row['count']
+            avg_score = row['avg_urgency_score']
+
+            if category and pd.notna(count):
+                result.append({
+                    "category": category,
+                    "count": int(count) if pd.notna(count) else 0,
+                    "avg_score": round(float(avg_score), 2) if pd.notna(avg_score) else 0
+                })
+
+        # 緊急度順にソート（今すぐ→1ヶ月以内→3ヶ月以内→3ヶ月以上先→機会があれば）
+        category_order = {"今すぐ": 1, "1ヶ月以内": 2, "3ヶ月以内": 3, "3ヶ月以上先": 4, "機会があれば": 5}
+        result.sort(key=lambda x: category_order.get(x["category"], 99))
+
+        return result
+
+    except Exception as e:
+        print(f"[DB] get_urgency_start_category_data error: {e}")
+        return []
+
+
+def get_workstyle_mobility_data(prefecture: str = None, municipality: str = None) -> list:
+    """雇用形態×移動パターンのデータを取得
+
+    Returns:
+        list: [{"workstyle": "正職員", "mobility": "地元志向", "count": 500, "avg_distance": 10.5}, ...]
+    """
+    try:
+        print(f"[DB] get_workstyle_mobility_data called: pref={prefecture}, muni={municipality}")
+        if USE_CSV_MODE:
+            df = _load_csv_data()
+            filtered = df[df['row_type'] == 'WORKSTYLE_MOBILITY']
+        else:
+            sql = "SELECT * FROM job_seeker_data WHERE row_type = 'WORKSTYLE_MOBILITY'"
+            filtered = query_df(sql)
+
+        if filtered.empty:
+            print(f"[DB] WORKSTYLE_MOBILITY: No data")
+            return []
+
+        # フィルタリング
+        if prefecture:
+            filtered = filtered[filtered['prefecture'] == prefecture]
+        if municipality and municipality not in (None, "None", "すべて", ""):
+            filtered = filtered[filtered['municipality'] == municipality]
+
+        if filtered.empty:
+            return []
+
+        # 数値変換
+        filtered['count'] = pd.to_numeric(filtered['count'], errors='coerce').fillna(0)
+        filtered['avg_reference_distance_km'] = pd.to_numeric(
+            filtered['avg_reference_distance_km'], errors='coerce'
+        ).fillna(0)
+
+        # 集計（category1 = 雇用形態, category2 = 移動タイプ）
+        result = []
+        for (workstyle, mobility), group in filtered.groupby(['category1', 'category2'], observed=True):
+            total_count = group['count'].sum()
+            # 加重平均距離
+            weighted_dist = (group['count'] * group['avg_reference_distance_km']).sum()
+            avg_dist = weighted_dist / total_count if total_count > 0 else 0
+            result.append({
+                "workstyle": workstyle,
+                "mobility": mobility,
+                "count": int(total_count),
+                "avg_distance": round(avg_dist, 1)
+            })
+
+        print(f"[DB] WORKSTYLE_MOBILITY: {len(result)} records returned")
+        return result
+
+    except Exception as e:
+        print(f"[DB] get_workstyle_mobility_data error: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+
+def get_map_markers(prefecture: str = None) -> list:
+    """地図表示用のマーカーデータを取得
+
+    Returns:
+        list: [{"name": "東京都", "lat": 35.68, "lng": 139.69, "count": 5000, "type": "prefecture"}, ...]
+    """
+    try:
+        print(f"[DB] get_map_markers called: pref={prefecture}")
+        if USE_CSV_MODE:
+            df = _load_csv_data()
+            filtered = df[df['row_type'] == 'SUMMARY']
+        else:
+            sql = "SELECT * FROM job_seeker_data WHERE row_type = 'SUMMARY'"
+            filtered = query_df(sql)
+
+        if filtered.empty:
+            print(f"[DB] get_map_markers: No SUMMARY data")
+            return []
+
+        # 座標があるデータのみ
+        filtered = filtered[
+            (filtered['latitude'].notna()) &
+            (filtered['longitude'].notna()) &
+            (filtered['latitude'] != '') &
+            (filtered['longitude'] != '')
+        ]
+
+        if prefecture and prefecture != "全国":
+            filtered = filtered[filtered['prefecture'] == prefecture]
+
+        if filtered.empty:
+            return []
+
+        # マーカーデータ生成
+        markers = []
+        for _, row in filtered.iterrows():
+            try:
+                lat = float(row['latitude'])
+                lng = float(row['longitude'])
+                # applicant_count を優先的に使用（countは0の場合がある）
+                count = int(float(row.get('applicant_count', 0) or row.get('count', 0) or 0))
+                name = row.get('municipality', '') or row.get('prefecture', '')
+
+                if lat and lng:
+                    markers.append({
+                        "name": name,
+                        "prefecture": row.get('prefecture', ''),
+                        "municipality": row.get('municipality', ''),
+                        "lat": lat,
+                        "lng": lng,
+                        "count": count,
+                        "male_count": int(float(row.get('male_count', 0) or 0)),
+                        "female_count": int(float(row.get('female_count', 0) or 0)),
+                        "type": "municipality" if row.get('municipality') else "prefecture"
+                    })
+            except (ValueError, TypeError):
+                continue
+
+        print(f"[DB] get_map_markers: {len(markers)} markers returned")
+        return markers
+
+    except Exception as e:
+        print(f"[DB] get_map_markers error: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+
+def get_flow_lines(prefecture: str = None) -> list:
+    """人材フロー用の線データを取得
+
+    Returns:
+        list: [{"from_pref": "東京都", "to_pref": "神奈川県", "count": 100, ...}, ...]
+    """
+    try:
+        print(f"[DB] get_flow_lines called: pref={prefecture}")
+        if USE_CSV_MODE:
+            df = _load_csv_data()
+            filtered = df[df['row_type'] == 'RESIDENCE_FLOW']
+        else:
+            sql = "SELECT * FROM job_seeker_data WHERE row_type = 'RESIDENCE_FLOW'"
+            filtered = query_df(sql)
+
+        if filtered.empty:
+            return []
+
+        if prefecture and prefecture != "全国":
+            filtered = filtered[
+                (filtered['prefecture'] == prefecture) |
+                (filtered['category1'] == prefecture)
+            ]
+
+        if filtered.empty:
+            return []
+
+        # 都道府県の座標マップ（SUMMARYから取得）
+        if USE_CSV_MODE:
+            summary_df = df[df['row_type'] == 'SUMMARY']
+        else:
+            summary_df = query_df("SELECT * FROM job_seeker_data WHERE row_type = 'SUMMARY'")
+
+        pref_coords = {}
+        for _, row in summary_df.iterrows():
+            pref = row.get('prefecture', '')
+            if pref and row.get('latitude') and row.get('longitude'):
+                try:
+                    pref_coords[pref] = {'lat': float(row['latitude']), 'lng': float(row['longitude'])}
+                except (ValueError, TypeError):
+                    continue
+
+        # フローデータ生成
+        flows = []
+        for _, row in filtered.iterrows():
+            try:
+                from_pref = row.get('prefecture', '')
+                to_pref = row.get('category1', '')
+                count = int(float(row.get('count', 0) or 0))
+
+                if from_pref in pref_coords and to_pref in pref_coords and from_pref != to_pref:
+                    flows.append({
+                        "from_pref": from_pref,
+                        "to_pref": to_pref,
+                        "count": count,
+                        "from_lat": pref_coords[from_pref]['lat'],
+                        "from_lng": pref_coords[from_pref]['lng'],
+                        "to_lat": pref_coords[to_pref]['lat'],
+                        "to_lng": pref_coords[to_pref]['lng']
+                    })
+            except (ValueError, TypeError):
+                continue
+
+        flows.sort(key=lambda x: x['count'], reverse=True)
+        print(f"[DB] get_flow_lines: {len(flows)} flows returned")
+        return flows[:100]
+
+    except Exception as e:
+        print(f"[DB] get_flow_lines error: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+
+# ========================================
+# 地図機能拡張（流入元/バランス/競合地域）
+# ========================================
+
+def get_inflow_sources(
+    target_prefecture: str,
+    target_municipality: str = None,
+    workstyle: str = None,
+    age_group: str = None,
+    gender: str = None
+) -> list:
+    """選択した市区町村への流入元を取得
+
+    Args:
+        target_prefecture: 対象都道府県
+        target_municipality: 対象市区町村（省略可）
+        workstyle: 雇用区分フィルタ（正職員/パート/その他）
+        age_group: 年代フィルタ（20代/30代/40代/50代以上）
+        gender: 性別フィルタ（男性/女性）
+
+    Returns:
+        list: [{"source_pref": "東京都", "source_muni": "渋谷区", "count": 50, "lat": 35.66, "lng": 139.70}, ...]
+    """
+    try:
+        print(f"[DB] get_inflow_sources: target={target_prefecture}/{target_municipality}, filters={workstyle}/{age_group}/{gender}")
+
+        if USE_CSV_MODE:
+            df = _load_csv_data()
+            filtered = df[df['row_type'] == 'RESIDENCE_FLOW']
+        else:
+            filtered = query_df("SELECT * FROM job_seeker_data WHERE row_type = 'RESIDENCE_FLOW'")
+
+        if filtered.empty:
+            print("[DB] get_inflow_sources: No RESIDENCE_FLOW data")
+            return []
+
+        # 希望勤務地（target）でフィルタ
+        # desired_prefectureが希望勤務地（都道府県）
+        if 'desired_prefecture' in filtered.columns:
+            filtered = filtered[filtered['desired_prefecture'] == target_prefecture]
+        elif 'category1' in filtered.columns:
+            # フォールバック: 旧形式対応
+            filtered = filtered[filtered['category1'] == target_prefecture]
+
+        if target_municipality and target_municipality != "全て":
+            # desired_municipalityが希望勤務地（市区町村）
+            if 'desired_municipality' in filtered.columns:
+                filtered = filtered[filtered['desired_municipality'] == target_municipality]
+            elif 'category2' in filtered.columns:
+                filtered = filtered[filtered['category2'] == target_municipality]
+
+        # 属性フィルタ（category1=年齢層, category2=性別）
+        if age_group and age_group != "全て" and 'category1' in filtered.columns:
+            filtered = filtered[filtered['category1'] == age_group]
+        if gender and gender != "全て" and 'category2' in filtered.columns:
+            filtered = filtered[filtered['category2'] == gender]
+        # workstyleフィルタは別途対応が必要（RESIDENCE_FLOWには含まれない場合あり）
+        if workstyle and workstyle != "全て" and 'workstyle' in filtered.columns:
+            filtered = filtered[filtered['workstyle'] == workstyle]
+
+        if filtered.empty:
+            print("[DB] get_inflow_sources: Filtered data is empty")
+            return []
+
+        # 居住地（source）別に集計
+        # prefecture列が居住地（都道府県）、municipality列が居住地（市区町村）
+        grouped = filtered.groupby(['prefecture', 'municipality']).agg({
+            'count': 'sum'
+        }).reset_index()
+
+        # SUMMARYデータから座標を取得（RESIDENCE_FLOWには座標がない場合がある）
+        if USE_CSV_MODE:
+            summary_df = _load_csv_data()
+            summary_df = summary_df[summary_df['row_type'] == 'SUMMARY']
+        else:
+            summary_df = query_df("SELECT prefecture, municipality, latitude, longitude FROM job_seeker_data WHERE row_type = 'SUMMARY'")
+
+        # 座標マップを作成
+        coord_map = {}
+        for _, row in summary_df.iterrows():
+            pref = row.get('prefecture', '')
+            muni = row.get('municipality', '')
+            lat = row.get('latitude')
+            lng = row.get('longitude')
+            if pref and muni and lat is not None and lng is not None:
+                try:
+                    coord_map[(pref, muni)] = (float(lat), float(lng))
+                except (ValueError, TypeError):
+                    continue
+
+        results = []
+        for _, row in grouped.iterrows():
+            try:
+                source_pref = row.get('prefecture', '')
+                source_muni = row.get('municipality', '')
+                count = int(float(row.get('count', 0) or 0))
+
+                # SUMMARYから座標を取得
+                coords = coord_map.get((source_pref, source_muni))
+                if coords:
+                    lat, lng = coords
+                    results.append({
+                        "source_pref": source_pref,
+                        "source_muni": source_muni,
+                        "count": count,
+                        "lat": lat,
+                        "lng": lng
+                    })
+            except (ValueError, TypeError):
+                continue
+
+        # countで降順ソート
+        results.sort(key=lambda x: x['count'], reverse=True)
+        print(f"[DB] get_inflow_sources: {len(results)} sources returned (from {len(grouped)} grouped rows)")
+        return results
+
+    except Exception as e:
+        print(f"[DB] get_inflow_sources error: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+
+def get_flow_balance(
+    prefecture: str = None,
+    workstyle: str = None,
+    age_group: str = None,
+    gender: str = None
+) -> list:
+    """市区町村ごとの流入/流出バランスを取得
+
+    Args:
+        prefecture: 都道府県フィルタ
+        workstyle: 雇用区分フィルタ
+        age_group: 年代フィルタ
+        gender: 性別フィルタ
+
+    Returns:
+        list: [{
+            "prefecture": "東京都", "municipality": "渋谷区",
+            "inflow": 500, "outflow": 300, "net_flow": 200, "ratio": 0.625,
+            "lat": 35.66, "lng": 139.70
+        }, ...]
+    """
+    try:
+        print(f"[DB] get_flow_balance: pref={prefecture}, filters={workstyle}/{age_group}/{gender}")
+
+        if USE_CSV_MODE:
+            df = _load_csv_data()
+            flow_df = df[df['row_type'] == 'RESIDENCE_FLOW']
+        else:
+            flow_df = query_df("SELECT * FROM job_seeker_data WHERE row_type = 'RESIDENCE_FLOW'")
+
+        if flow_df.empty:
+            return []
+
+        # 属性フィルタ
+        if workstyle and workstyle != "全て" and 'workstyle' in flow_df.columns:
+            flow_df = flow_df[flow_df['workstyle'] == workstyle]
+        if age_group and age_group != "全て" and 'age_group' in flow_df.columns:
+            flow_df = flow_df[flow_df['age_group'] == age_group]
+        if gender and gender != "全て" and 'gender' in flow_df.columns:
+            flow_df = flow_df[flow_df['gender'] == gender]
+
+        if prefecture and prefecture != "全国":
+            # 居住地または希望勤務地が対象都道府県
+            flow_df = flow_df[
+                (flow_df['prefecture'] == prefecture) |
+                (flow_df['category1'] == prefecture)
+            ]
+
+        if flow_df.empty:
+            return []
+
+        # 流出: 居住地（prefecture）から出ていく
+        outflow_grouped = flow_df.groupby(['prefecture', 'municipality']).agg({
+            'count': 'sum',
+            'latitude': 'first',
+            'longitude': 'first'
+        }).reset_index()
+        outflow_grouped = outflow_grouped.rename(columns={'count': 'outflow'})
+
+        # 流入: 希望勤務地（category1, category2）に来る
+        inflow_df = flow_df.copy()
+        inflow_df = inflow_df.rename(columns={'category1': 'target_pref', 'category2': 'target_muni'})
+        inflow_grouped = inflow_df.groupby(['target_pref', 'target_muni']).agg({
+            'count': 'sum'
+        }).reset_index()
+        inflow_grouped = inflow_grouped.rename(columns={'target_pref': 'prefecture', 'target_muni': 'municipality', 'count': 'inflow'})
+
+        # 座標を追加
+        if USE_CSV_MODE:
+            summary_df = df[df['row_type'].isin(['SUMMARY', 'MUNICIPALITY'])]
+        else:
+            summary_df = query_df("SELECT * FROM job_seeker_data WHERE row_type IN ('SUMMARY', 'MUNICIPALITY')")
+
+        coords = {}
+        for _, row in summary_df.iterrows():
+            pref = row.get('prefecture', '')
+            muni = row.get('municipality', '')
+            key = f"{pref}_{muni}" if muni else pref
+            lat = row.get('latitude', 0)
+            lng = row.get('longitude', 0)
+            if lat and lng:
+                try:
+                    coords[key] = {'lat': float(lat), 'lng': float(lng)}
+                except (ValueError, TypeError):
+                    continue
+
+        # 流入と流出をマージ
+        merged = pd.merge(
+            outflow_grouped[['prefecture', 'municipality', 'outflow', 'latitude', 'longitude']],
+            inflow_grouped[['prefecture', 'municipality', 'inflow']],
+            on=['prefecture', 'municipality'],
+            how='outer'
+        ).fillna(0)
+
+        results = []
+        for _, row in merged.iterrows():
+            try:
+                pref = row.get('prefecture', '')
+                muni = row.get('municipality', '')
+                inflow = int(float(row.get('inflow', 0)))
+                outflow = int(float(row.get('outflow', 0)))
+                net_flow = inflow - outflow
+                total = inflow + outflow
+                ratio = inflow / total if total > 0 else 0.5
+
+                lat = float(row.get('latitude', 0) or 0)
+                lng = float(row.get('longitude', 0) or 0)
+
+                # 座標がない場合はcoordsから取得
+                if lat == 0 or lng == 0:
+                    key = f"{pref}_{muni}" if muni else pref
+                    if key in coords:
+                        lat = coords[key]['lat']
+                        lng = coords[key]['lng']
+
+                if lat != 0 and lng != 0 and (inflow > 0 or outflow > 0):
+                    results.append({
+                        "prefecture": pref,
+                        "municipality": muni,
+                        "inflow": inflow,
+                        "outflow": outflow,
+                        "net_flow": net_flow,
+                        "ratio": round(ratio, 3),
+                        "lat": lat,
+                        "lng": lng
+                    })
+            except (ValueError, TypeError):
+                continue
+
+        results.sort(key=lambda x: abs(x['net_flow']), reverse=True)
+        print(f"[DB] get_flow_balance: {len(results)} municipalities returned")
+        return results[:200]
+
+    except Exception as e:
+        print(f"[DB] get_flow_balance error: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+
+def get_competing_areas(
+    source_prefecture: str,
+    source_municipality: str = None,
+    workstyle: str = None,
+    age_group: str = None,
+    gender: str = None
+) -> list:
+    """選択地域の求職者が希望する他の勤務地を取得
+
+    Args:
+        source_prefecture: 居住地（都道府県）
+        source_municipality: 居住地（市区町村）
+        workstyle: 雇用区分フィルタ
+        age_group: 年代フィルタ
+        gender: 性別フィルタ
+
+    Returns:
+        list: [{
+            "target_pref": "東京都", "target_muni": "新宿区",
+            "count": 80, "percentage": 15.2,
+            "lat": 35.69, "lng": 139.70
+        }, ...]
+    """
+    try:
+        print(f"[DB] get_competing_areas: source={source_prefecture}/{source_municipality}, filters={workstyle}/{age_group}/{gender}")
+
+        if USE_CSV_MODE:
+            df = _load_csv_data()
+            filtered = df[df['row_type'] == 'RESIDENCE_FLOW']
+        else:
+            filtered = query_df("SELECT * FROM job_seeker_data WHERE row_type = 'RESIDENCE_FLOW'")
+
+        if filtered.empty:
+            return []
+
+        # 居住地でフィルタ
+        filtered = filtered[filtered['prefecture'] == source_prefecture]
+        if source_municipality and source_municipality != "全て":
+            filtered = filtered[filtered['municipality'] == source_municipality]
+
+        # 属性フィルタ（category1=年齢層, category2=性別）
+        if age_group and age_group != "全て" and 'category1' in filtered.columns:
+            filtered = filtered[filtered['category1'] == age_group]
+        if gender and gender != "全て" and 'category2' in filtered.columns:
+            filtered = filtered[filtered['category2'] == gender]
+        if workstyle and workstyle != "全て" and 'workstyle' in filtered.columns:
+            filtered = filtered[filtered['workstyle'] == workstyle]
+
+        if filtered.empty:
+            print("[DB] get_competing_areas: Filtered data is empty")
+            return []
+
+        # 全体の人数を取得
+        total_count = filtered['count'].sum()
+        if total_count == 0:
+            return []
+
+        # 希望勤務地カラムを特定
+        desired_pref_col = 'desired_prefecture' if 'desired_prefecture' in filtered.columns else 'category1'
+        desired_muni_col = 'desired_municipality' if 'desired_municipality' in filtered.columns else 'category2'
+
+        # 希望勤務地別に集計
+        grouped = filtered.groupby([desired_pref_col, desired_muni_col]).agg({
+            'count': 'sum'
+        }).reset_index()
+
+        # SUMMARYデータから座標を取得
+        if USE_CSV_MODE:
+            summary_df = _load_csv_data()
+            summary_df = summary_df[summary_df['row_type'] == 'SUMMARY']
+        else:
+            summary_df = query_df("SELECT prefecture, municipality, latitude, longitude FROM job_seeker_data WHERE row_type = 'SUMMARY'")
+
+        coords = {}
+        for _, row in summary_df.iterrows():
+            pref = row.get('prefecture', '')
+            muni = row.get('municipality', '')
+            key = f"{pref}_{muni}" if muni else pref
+            lat = row.get('latitude')
+            lng = row.get('longitude')
+            if lat is not None and lng is not None:
+                try:
+                    coords[key] = {'lat': float(lat), 'lng': float(lng)}
+                except (ValueError, TypeError):
+                    continue
+
+        results = []
+        for _, row in grouped.iterrows():
+            try:
+                target_pref = row.get(desired_pref_col, '')
+                target_muni = row.get(desired_muni_col, '')
+                count = int(float(row.get('count', 0)))
+                percentage = round(count / total_count * 100, 1) if total_count > 0 else 0
+
+                # 座標取得
+                key = f"{target_pref}_{target_muni}" if target_muni else target_pref
+                lat, lng = 0, 0
+                if key in coords:
+                    lat = coords[key]['lat']
+                    lng = coords[key]['lng']
+                elif target_pref in coords:
+                    lat = coords[target_pref]['lat']
+                    lng = coords[target_pref]['lng']
+
+                if lat != 0 and lng != 0:
+                    results.append({
+                        "target_pref": target_pref,
+                        "target_muni": target_muni,
+                        "count": count,
+                        "percentage": percentage,
+                        "lat": lat,
+                        "lng": lng
+                    })
+            except (ValueError, TypeError):
+                continue
+
+        results.sort(key=lambda x: x['count'], reverse=True)
+        print(f"[DB] get_competing_areas: {len(results)} areas returned (total: {total_count})")
+        return results
+
+    except Exception as e:
+        print(f"[DB] get_competing_areas error: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+
+def get_workstyle_mobility_summary(prefecture: str = None, municipality: str = None) -> dict:
+    """雇用形態別の移動パターンサマリーを取得
+
+    Returns:
+        dict: {
+            "by_workstyle": [{"workstyle": "正職員", "count": 1000, "avg_distance": 15.2}, ...],
+            "by_mobility": [{"mobility": "地元志向", "count": 2000, "avg_distance": 5.0}, ...],
+            "heatmap": [[100, 200, 150, 50], [80, 180, 120, 40], [30, 60, 40, 20]]  # workstyle x mobility
+        }
+    """
+    try:
+        data = get_workstyle_mobility_data(prefecture, municipality)
+        if not data:
+            return {"by_workstyle": [], "by_mobility": [], "heatmap": []}
+
+        df = pd.DataFrame(data)
+
+        # 雇用形態別集計
+        workstyle_summary = []
+        for ws, group in df.groupby('workstyle'):
+            total = group['count'].sum()
+            weighted_dist = (group['count'] * group['avg_distance']).sum()
+            avg_dist = weighted_dist / total if total > 0 else 0
+            workstyle_summary.append({
+                "workstyle": ws,
+                "count": int(total),
+                "avg_distance": round(avg_dist, 1)
+            })
+        # 人数順にソート
+        workstyle_summary.sort(key=lambda x: x["count"], reverse=True)
+
+        # 移動パターン別集計
+        mobility_summary = []
+        mobility_order = {"地元志向": 1, "近隣移動": 2, "中距離移動": 3, "遠距離移動": 4}
+        for mob, group in df.groupby('mobility'):
+            total = group['count'].sum()
+            weighted_dist = (group['count'] * group['avg_distance']).sum()
+            avg_dist = weighted_dist / total if total > 0 else 0
+            mobility_summary.append({
+                "mobility": mob,
+                "count": int(total),
+                "avg_distance": round(avg_dist, 1)
+            })
+        mobility_summary.sort(key=lambda x: mobility_order.get(x["mobility"], 99))
+
+        # ヒートマップ用データ（workstyle x mobility）
+        workstyles = ["正職員", "パート", "その他"]
+        mobilities = ["地元志向", "近隣移動", "中距離移動", "遠距離移動"]
+        heatmap = []
+        for ws in workstyles:
+            row = []
+            for mob in mobilities:
+                match = df[(df['workstyle'] == ws) & (df['mobility'] == mob)]
+                count = int(match['count'].sum()) if not match.empty else 0
+                row.append(count)
+            heatmap.append(row)
+
+        return {
+            "by_workstyle": workstyle_summary,
+            "by_mobility": mobility_summary,
+            "heatmap": heatmap,
+            "workstyles": workstyles,
+            "mobilities": mobilities
+        }
+
+    except Exception as e:
+        print(f"[DB] get_workstyle_mobility_summary error: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"by_workstyle": [], "by_mobility": [], "heatmap": []}
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("データベースヘルパーテスト")
