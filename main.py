@@ -355,15 +355,9 @@ def load_data() -> pd.DataFrame:
             _data_source = "Turso DB (lightweight)"
             print(f"[DATA] Turso SUCCESS: {len(_dataframe):,} rows", flush=True)
             log(f"[DATA] Loaded {len(_dataframe):,} rows from Turso")
-            # 初回ロード成功後にバックグラウンドプリロードを遅延開始
-            if _DB_HELPER_AVAILABLE:
-                try:
-                    from db_helper import is_preload_ready
-                    if not is_preload_ready():
-                        print("[DATA] Starting background preload (lazy)...", flush=True)
-                        start_background_preload()
-                except Exception as e:
-                    print(f"[DATA] Background preload start failed: {e}", flush=True)
+            # バックグラウンドプリロードは無効化（502エラー回避）
+            # db_helperの各関数が必要カラムのみのクエリを使用するため、
+            # 全カラムプリロードは不要
             return _dataframe
         except Exception as exc:
             print(f"[DATA] Turso FAILED: {type(exc).__name__}: {exc}", flush=True)
