@@ -1091,6 +1091,8 @@ def _batch_stats_query(prefecture: str = None, municipality: str = None) -> dict
     従来: row_typeごとに3-4回クエリ
     改善後: 1回のクエリで全row_type取得 → Python内でフィルタ
 
+    メモリ最適化: 必要なカラムのみ取得（Render 512MB対応）
+
     Args:
         prefecture: 都道府県名（Noneで全国）
         municipality: 市区町村名
@@ -1118,7 +1120,14 @@ def _batch_stats_query(prefecture: str = None, municipality: str = None) -> dict
     print(f"[DB] Batch stats query for {prefecture or 'ALL'}/{municipality or 'ALL'}...")
 
     try:
-        # 必要なrow_typeを1回のクエリで全取得
+        # メモリ最適化: 必要なカラムのみ取得（SELECT * を避ける）
+        # SUMMARY用: avg_desired_areas, avg_qualifications, male_count, female_count
+        # RESIDENCE_FLOW用: avg_reference_distance_km
+        # AGE_GENDER用: category1, age_group, count
+        BATCH_COLUMNS = """row_type, prefecture, municipality,
+            avg_desired_areas, avg_qualifications, male_count, female_count,
+            avg_reference_distance_km, category1, age_group, count, applicant_count"""
+
         conditions = ["row_type IN ('SUMMARY', 'RESIDENCE_FLOW', 'AGE_GENDER')"]
         params = []
 
@@ -1131,9 +1140,9 @@ def _batch_stats_query(prefecture: str = None, municipality: str = None) -> dict
 
         where_clause = " AND ".join(conditions)
 
-        # 1回のHTTP通信で全データ取得
+        # 1回のHTTP通信で必要なカラムのみ取得（メモリ最適化）
         df_all = query_df(
-            f"SELECT * FROM job_seeker_data WHERE {where_clause}",
+            f"SELECT {BATCH_COLUMNS} FROM job_seeker_data WHERE {where_clause}",
             tuple(params) if params else None
         )
 
@@ -1350,10 +1359,11 @@ def get_national_stats() -> dict:
 
         # フォールバック: バッチクエリが空の場合、SUMMARYのみの小さいクエリを実行
         # （全国バッチクエリは502エラーになることがあるため）
+        # メモリ最適化: 必要なカラムのみ取得
         if df_summary.empty:
             print("[DEBUG] Batch query returned empty SUMMARY, trying fallback query...", flush=True)
             try:
-                df_summary = query_df("SELECT * FROM job_seeker_data WHERE row_type = 'SUMMARY'")
+                df_summary = query_df("SELECT prefecture, municipality, avg_desired_areas, avg_qualifications, male_count, female_count FROM job_seeker_data WHERE row_type = 'SUMMARY'")
                 print(f"[DEBUG] Fallback SUMMARY query: {len(df_summary)} rows", flush=True)
             except Exception as fallback_err:
                 print(f"[ERROR] Fallback SUMMARY query failed: {fallback_err}", flush=True)
@@ -1377,10 +1387,10 @@ def get_national_stats() -> dict:
 
         # RESIDENCE_FLOWから平均移動距離を計算
         df_flow = batch_data.get("RESIDENCE_FLOW", pd.DataFrame())
-        # フォールバック: RESIDENCE_FLOWも空の場合、個別クエリ
+        # フォールバック: RESIDENCE_FLOWも空の場合、個別クエリ（メモリ最適化）
         if df_flow.empty:
             try:
-                df_flow = query_df("SELECT * FROM job_seeker_data WHERE row_type = 'RESIDENCE_FLOW' LIMIT 5000")
+                df_flow = query_df("SELECT prefecture, municipality, avg_reference_distance_km FROM job_seeker_data WHERE row_type = 'RESIDENCE_FLOW' LIMIT 5000")
                 print(f"[DEBUG] Fallback RESIDENCE_FLOW query: {len(df_flow)} rows", flush=True)
             except Exception as flow_err:
                 print(f"[DEBUG] Fallback RESIDENCE_FLOW query failed: {flow_err}", flush=True)
@@ -1392,10 +1402,10 @@ def get_national_stats() -> dict:
 
         # AGE_GENDERから年齢層別分布を計算
         df_age = batch_data.get("AGE_GENDER", pd.DataFrame())
-        # フォールバック: AGE_GENDERも空の場合、個別クエリ
+        # フォールバック: AGE_GENDERも空の場合、個別クエリ（メモリ最適化）
         if df_age.empty:
             try:
-                df_age = query_df("SELECT * FROM job_seeker_data WHERE row_type = 'AGE_GENDER'")
+                df_age = query_df("SELECT prefecture, municipality, category1, age_group, count, applicant_count FROM job_seeker_data WHERE row_type = 'AGE_GENDER'")
                 print(f"[DEBUG] Fallback AGE_GENDER query: {len(df_age)} rows", flush=True)
             except Exception as age_err:
                 print(f"[DEBUG] Fallback AGE_GENDER query failed: {age_err}", flush=True)
