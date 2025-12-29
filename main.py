@@ -2960,9 +2960,18 @@ def dashboard_page() -> None:
                             if lat and lng:
                                 clicked_muni = find_municipality_at_point(lat, lng, geojson_data_for_click)
                                 if clicked_muni and clicked_muni != state.get("municipality"):
-                                    print(f"[CHOROPLETH] Clicked: {clicked_muni} at ({lat}, {lng})")
-                                    state["municipality"] = clicked_muni
-                                    show_content.refresh()
+                                    # データベースに存在する市区町村か確認
+                                    current_pref = state.get("prefecture", "全国")
+                                    valid_munis = get_municipality_options(current_pref)
+                                    if clicked_muni in valid_munis:
+                                        print(f"[CHOROPLETH] Clicked: {clicked_muni} at ({lat}, {lng})")
+                                        state["municipality"] = clicked_muni
+                                        show_content.refresh()
+                                    else:
+                                        # データベースに存在しない市区町村をクリックした場合
+                                        print(f"[CHOROPLETH] Clicked {clicked_muni} but not in DB (valid: {len(valid_munis)} munis)")
+                                        # ユーザーに通知
+                                        ui.notify(f"「{clicked_muni}」のデータはありません", type="warning", position="top")
 
                     map_widget.on("map-click", on_map_click)
 
