@@ -13,12 +13,22 @@ from __future__ import annotations
 
 import os
 import gc
+import time
 from pathlib import Path
 from typing import List, Dict, Any
+from collections import defaultdict
 
 import httpx
 import pandas as pd
 from nicegui import app, ui
+
+# セキュリティ: パスワードハッシュ化 (2025-12-29追加)
+try:
+    import bcrypt
+    BCRYPT_AVAILABLE = True
+except ImportError:
+    BCRYPT_AVAILABLE = False
+    print("[WARNING] bcrypt not installed - using plain text password comparison")
 
 # メモリ最適化: 起動時にガベージコレクション
 gc.collect()
@@ -144,7 +154,25 @@ except Exception as exc:  # pragma: no cover
 # ---------------------------------------------------------------------
 TURSO_DATABASE_URL = os.getenv("TURSO_DATABASE_URL", "")
 TURSO_AUTH_TOKEN = os.getenv("TURSO_AUTH_TOKEN", "")
-AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "cyxen_2025")
+# セキュリティ修正（2025-12-29）: デフォルトパスワードを削除
+# AUTH_PASSWORD は環境変数で必ず設定すること
+AUTH_PASSWORD = os.getenv("AUTH_PASSWORD")
+if not AUTH_PASSWORD:
+    log("[WARNING] AUTH_PASSWORD not set - login will fail until configured")
+    AUTH_PASSWORD = ""  # 空文字だと全てのパスワードが失敗する
+
+# セキュリティ強化（2025-12-29追加）: パスワードハッシュ対応
+# AUTH_PASSWORD_HASH を設定すると bcrypt ハッシュでパスワード検証
+# 例: python -c "import bcrypt; print(bcrypt.hashpw(b'your_password', bcrypt.gensalt()).decode())"
+AUTH_PASSWORD_HASH = os.getenv("AUTH_PASSWORD_HASH", "")
+
+# レート制限設定（ブルートフォース攻撃対策）
+RATE_LIMIT_MAX_ATTEMPTS = int(os.getenv("RATE_LIMIT_MAX_ATTEMPTS", "5"))  # 最大試行回数
+RATE_LIMIT_LOCKOUT_SECONDS = int(os.getenv("RATE_LIMIT_LOCKOUT_SECONDS", "300"))  # ロックアウト時間（秒）
+
+# レート制限用のメモリストア
+_login_attempts: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"count": 0, "lockout_until": 0})
+
 ALLOWED_DOMAINS = [d.strip() for d in os.getenv("ALLOWED_DOMAINS", "f-a-c.co.jp,cyxen.co.jp").split(",")]
 
 # Prefecture ordering (JIS 北→南)
@@ -604,17 +632,82 @@ def get_user_email() -> str:
     return app.storage.user.get("email", "")
 
 
+def _check_rate_limit(email: str) -> tuple[bool, str]:
+    """レート制限チェック（ブルートフォース攻撃対策）"""
+    now = time.time()
+    attempt = _login_attempts[email]
+
+    # ロックアウト中かチェック
+    if attempt["lockout_until"] > now:
+        remaining = int(attempt["lockout_until"] - now)
+        minutes = remaining // 60
+        seconds = remaining % 60
+        return False, f"アカウントがロックされています。{minutes}分{seconds}秒後に再試行してください"
+
+    # ロックアウト期間が過ぎていたらリセット
+    if attempt["lockout_until"] > 0 and attempt["lockout_until"] <= now:
+        attempt["count"] = 0
+        attempt["lockout_until"] = 0
+
+    return True, ""
+
+
+def _record_failed_attempt(email: str) -> None:
+    """ログイン失敗を記録"""
+    attempt = _login_attempts[email]
+    attempt["count"] += 1
+    log(f"[RATE_LIMIT] Failed attempt {attempt['count']}/{RATE_LIMIT_MAX_ATTEMPTS} for {email}")
+
+    if attempt["count"] >= RATE_LIMIT_MAX_ATTEMPTS:
+        attempt["lockout_until"] = time.time() + RATE_LIMIT_LOCKOUT_SECONDS
+        log(f"[RATE_LIMIT] Account locked for {RATE_LIMIT_LOCKOUT_SECONDS}s: {email}")
+
+
+def _clear_failed_attempts(email: str) -> None:
+    """ログイン成功時に失敗カウントをリセット"""
+    if email in _login_attempts:
+        _login_attempts[email] = {"count": 0, "lockout_until": 0}
+
+
+def _verify_password(password: str) -> bool:
+    """パスワード検証（bcryptハッシュまたはプレーンテキスト）"""
+    # AUTH_PASSWORD_HASH が設定されている場合はbcryptで検証
+    if AUTH_PASSWORD_HASH and BCRYPT_AVAILABLE:
+        try:
+            return bcrypt.checkpw(password.encode('utf-8'), AUTH_PASSWORD_HASH.encode('utf-8'))
+        except Exception as e:
+            log(f"[AUTH] bcrypt verification error: {e}")
+            return False
+
+    # フォールバック: プレーンテキスト比較（非推奨）
+    return password == AUTH_PASSWORD
+
+
 def verify_login(email: str, password: str) -> tuple[bool, str]:
+    """ログイン検証（レート制限とパスワードハッシュ対応）"""
     if not email or not password:
         return False, "メールアドレスとパスワードを入力してください"
     if "@" not in email:
         return False, "有効なメールアドレスを入力してください"
 
+    # レート制限チェック
+    rate_ok, rate_msg = _check_rate_limit(email)
+    if not rate_ok:
+        return False, rate_msg
+
+    # ドメイン検証
     domain = email.split("@")[1].lower()
     if domain not in [d.lower() for d in ALLOWED_DOMAINS]:
+        _record_failed_attempt(email)
         return False, f"ドメイン {domain} は許可されていません"
-    if password != AUTH_PASSWORD:
+
+    # パスワード検証
+    if not _verify_password(password):
+        _record_failed_attempt(email)
         return False, "パスワードが正しくありません"
+
+    # ログイン成功
+    _clear_failed_attempts(email)
     return True, ""
 
 
@@ -3160,22 +3253,22 @@ def dashboard_page() -> None:
                                                         </div>
                                                     ''', sanitize=False)
                                         elif detail.get('age_distribution'):
-                                            # フォールバック: 性別なしの年齢分布
+                                            # フォールバック: 性別なしの年齢分布（パフォーマンス最適化 2025-12-29）
                                             with ui.element("div").classes("mb-3"):
                                                 ui.label("👥 年齢構成").classes("font-bold mb-1").style(f"color: {TEXT_COLOR}")
                                                 age_dist = detail['age_distribution']
+                                                total = sum(age_dist.values())  # ループ外で1回だけ計算
                                                 for age_group, count in sorted(age_dist.items()):
-                                                    total = sum(age_dist.values())
                                                     pct = (count / total * 100) if total > 0 else 0
                                                     ui.label(f"{age_group}: {count}人 ({pct:.0f}%)").style(f"color: {MUTED_COLOR}; font-size: 0.85rem")
 
-                                        # 雇用形態分布
+                                        # 雇用形態分布（パフォーマンス最適化 2025-12-29: totalをループ外で計算）
                                         if detail.get('workstyle_distribution'):
                                             with ui.element("div").classes("mb-3"):
-                                                ui.label("💼 希望雇用形態").classes("font-bold mb-1").style(f"color: {TEXT_COLOR}")
+                                                ui.label("💼 希望雇用形態（上位5件）").classes("font-bold mb-1").style(f"color: {TEXT_COLOR}")
                                                 ws_dist = detail['workstyle_distribution']
+                                                total = sum(ws_dist.values())  # ループ外で1回だけ計算
                                                 for ws, count in sorted(ws_dist.items(), key=lambda x: -x[1])[:5]:
-                                                    total = sum(ws_dist.values())
                                                     pct = (count / total * 100) if total > 0 else 0
                                                     ui.label(f"{ws}: {count}人 ({pct:.0f}%)").style(f"color: {MUTED_COLOR}; font-size: 0.85rem")
                                 except Exception as e:

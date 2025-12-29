@@ -28,13 +28,17 @@ print(f"[STARTUP] Current directory: {os.getcwd()}")
 print("=" * 60)
 
 # =====================================
-# Reflex Cloud用環境変数設定（Secrets代替）
+# Reflex Cloud用環境変数設定
 # =====================================
-# 注意: setdefaultではなく直接代入で既存のSecrets設定を上書き
+# セキュリティ修正（2025-12-29）: ハードコード認証情報を削除
+# 環境変数またはReflex CloudのSecretsから読み込む
 if os.getenv("REFLEX_DEPLOYMENT") is not None:
-    print("[STARTUP] Reflex Cloud detected - forcing hardcoded env vars")
-    os.environ["TURSO_DATABASE_URL"] = "libsql://job-jobseekeranalyzer-makimaki1006.aws-ap-northeast-1.turso.io"
-    os.environ["TURSO_AUTH_TOKEN"] = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3NjM3ODk2NzgsImlkIjoiNTU1YzQwMzgtZjI0MS00ODAwLTgzYTctYmE4MmYzOGQyZGFhIiwicmlkIjoiNjJmNTFkMjgtNTdhNC00M2Y2LWIzZTAtYmRlZGZiM2YxNmY1In0.Q-WMFowjDxhbdUqkeKYG7y4qkhfbsFaVgqKtAyU0y2bdCTNCHOp8IQsHFYgJ6wdT4m96WIXtP4UO-jRbB8woBg"
+    print("[STARTUP] Reflex Cloud detected - using environment secrets")
+    # TURSO_DATABASE_URL, TURSO_AUTH_TOKEN はReflex Cloud Secretsで設定すること
+    if not os.getenv("TURSO_DATABASE_URL"):
+        print("[WARNING] TURSO_DATABASE_URL not set - please configure Reflex Cloud Secrets")
+    if not os.getenv("TURSO_AUTH_TOKEN"):
+        print("[WARNING] TURSO_AUTH_TOKEN not set - please configure Reflex Cloud Secrets")
 
 # dotenvのインポート（エラーハンドリング付き）
 try:
@@ -3256,12 +3260,27 @@ def get_workstyle_mobility_data(prefecture: str = None, municipality: str = None
 
 
 def get_map_markers(prefecture: str = None) -> list:
-    """地図表示用のマーカーデータを取得
+    """地図表示用のマーカーデータを取得（キャッシュ対応 2025-12-29）
+
+    パフォーマンス最適化:
+    - SUMMARYデータは頻繁に変更されないため静的キャッシュを使用
+    - 都道府県別にキャッシュを分離
 
     Returns:
         list: [{"name": "東京都", "lat": 35.68, "lng": 139.69, "count": 5000, "type": "prefecture"}, ...]
     """
+    global _static_cache
+
     try:
+        # キャッシュキー生成
+        cache_key = f"map_markers_{prefecture or 'ALL'}"
+
+        # キャッシュヒット
+        if cache_key in _static_cache:
+            cached = _static_cache[cache_key]
+            print(f"[DB] get_map_markers cache HIT: {len(cached)} markers")
+            return cached
+
         print(f"[DB] get_map_markers called: pref={prefecture}")
         if USE_CSV_MODE:
             df = _load_csv_data()
@@ -3313,7 +3332,9 @@ def get_map_markers(prefecture: str = None) -> list:
             except (ValueError, TypeError):
                 continue
 
-        print(f"[DB] get_map_markers: {len(markers)} markers returned")
+        # キャッシュに保存（パフォーマンス最適化 2025-12-29）
+        _static_cache[cache_key] = markers
+        print(f"[DB] get_map_markers: {len(markers)} markers returned (cached)")
         return markers
 
     except Exception as e:
@@ -3324,12 +3345,26 @@ def get_map_markers(prefecture: str = None) -> list:
 
 
 def get_flow_lines(prefecture: str = None) -> list:
-    """人材フロー用の線データを取得
+    """人材フロー用の線データを取得（キャッシュ対応 2025-12-29）
+
+    パフォーマンス最適化:
+    - 結果をキャッシュしてDBクエリを削減
 
     Returns:
         list: [{"from_pref": "東京都", "to_pref": "神奈川県", "count": 100, ...}, ...]
     """
+    global _static_cache
+
     try:
+        # キャッシュキー生成
+        cache_key = f"flow_lines_{prefecture or 'ALL'}"
+
+        # キャッシュヒット
+        if cache_key in _static_cache:
+            cached = _static_cache[cache_key]
+            print(f"[DB] get_flow_lines cache HIT: {len(cached)} flows")
+            return cached
+
         print(f"[DB] get_flow_lines called: pref={prefecture}")
         if USE_CSV_MODE:
             df = _load_csv_data()
@@ -3390,8 +3425,12 @@ def get_flow_lines(prefecture: str = None) -> list:
                 continue
 
         flows.sort(key=lambda x: x['count'], reverse=True)
-        print(f"[DB] get_flow_lines: {len(flows)} flows returned")
-        return flows[:100]
+        result = flows[:100]
+
+        # キャッシュに保存（パフォーマンス最適化 2025-12-29）
+        _static_cache[cache_key] = result
+        print(f"[DB] get_flow_lines: {len(result)} flows returned (cached)")
+        return result
 
     except Exception as e:
         print(f"[DB] get_flow_lines error: {e}")
