@@ -355,6 +355,15 @@ def load_data() -> pd.DataFrame:
             _data_source = "Turso DB (lightweight)"
             print(f"[DATA] Turso SUCCESS: {len(_dataframe):,} rows", flush=True)
             log(f"[DATA] Loaded {len(_dataframe):,} rows from Turso")
+            # 初回ロード成功後にバックグラウンドプリロードを遅延開始
+            if _DB_HELPER_AVAILABLE:
+                try:
+                    from db_helper import is_preload_ready
+                    if not is_preload_ready():
+                        print("[DATA] Starting background preload (lazy)...", flush=True)
+                        start_background_preload()
+                except Exception as e:
+                    print(f"[DATA] Background preload start failed: {e}", flush=True)
             return _dataframe
         except Exception as exc:
             print(f"[DATA] Turso FAILED: {type(exc).__name__}: {exc}", flush=True)
@@ -3120,11 +3129,11 @@ if __name__ in {"__main__", "__mp_main__"}:
     print(f"[STARTUP] Starting NiceGUI app on port {port}...")
     print(f"[STARTUP] Production mode: {is_production}")
 
-    # バックグラウンドで全データを事前ロード開始（タイムアウト回避）
-    # ユーザーは待たずに操作開始可能、バックグラウンドで全カラムがキャッシュされる
-    if _DB_HELPER_AVAILABLE:
-        print("[STARTUP] Starting background data preload...")
-        start_background_preload()
+    # バックグラウンド事前ロードは起動時には開始しない（502エラー回避）
+    # 代わりにload_data()呼び出し時に遅延開始する
+    # if _DB_HELPER_AVAILABLE:
+    #     print("[STARTUP] Starting background data preload...")
+    #     start_background_preload()
 
     ui.run(
         title="job_ap_analyzer_gui",
