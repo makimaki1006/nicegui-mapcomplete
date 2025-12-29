@@ -769,7 +769,9 @@ def dashboard_page() -> None:
             return ["すべて"]
         filtered = df[df["prefecture"] == pref_value]
         muni_list = filtered["municipality"].dropna().astype(str).str.strip()
-        muni_list = [m for m in muni_list.unique().tolist() if m and m.lower() != "nan"]
+        # "nan", "None", 空文字を除外（NULL municipalityは都道府県レベル集計なのでドロップダウンに表示しない）
+        invalid_values = {"nan", "none", "null", ""}
+        muni_list = [m for m in muni_list.unique().tolist() if m and m.lower() not in invalid_values]
         options = ["すべて"] + sorted(muni_list)
         log(f"[DATA] Municipality options for {pref_value}: {options[:10]} ... total {len(options)-1}")
         return options
@@ -919,14 +921,40 @@ def dashboard_page() -> None:
                 # === 市場概況タブ（Reflex完全再現版） ===
                 ui.label("総合概要").classes("text-xl font-semibold mb-4").style(f"color: {TEXT_COLOR}")
 
-                # データ取得（Reflexと同じロジック）
-                total_applicants = int(safe_sum(filtered_df, "applicant_count")) if "applicant_count" in filtered_df.columns else len(filtered_df)
-                male_total = int(safe_sum(filtered_df, "male_count")) if "male_count" in filtered_df.columns else 0
-                female_total = int(safe_sum(filtered_df, "female_count")) if "female_count" in filtered_df.columns else 0
-                avg_age_val = round(safe_mean(filtered_df, "avg_age"), 1) if "avg_age" in filtered_df.columns else None
+                # === 3層比較パネル用データ取得（KPIカードでも使用） ===
+                pref_val = state["prefecture"] if state["prefecture"] != "全国" else None
+                muni_val = state["municipality"] if state["municipality"] != "すべて" else None
+
+                # db_helperから統計取得
+                nat_stats = get_national_stats()
+                pref_stats = get_prefecture_stats(pref_val) if pref_val else {}
+                muni_stats = get_municipality_stats(pref_val, muni_val) if pref_val and muni_val else {}
+
+                # 選択レベルに応じたKPIデータ取得（市区町村 > 都道府県 > 全国）
+                if muni_val and muni_stats:
+                    kpi_stats = muni_stats
+                    kpi_label = f"{pref_val} {muni_val}"
+                elif pref_val and pref_stats:
+                    kpi_stats = pref_stats
+                    kpi_label = pref_val
+                else:
+                    kpi_stats = nat_stats
+                    kpi_label = "全国"
+
+                # KPIデータ取得（統計関数から）
+                male_total = kpi_stats.get("male_count", 0)
+                female_total = kpi_stats.get("female_count", 0)
+                total_applicants = male_total + female_total
+
+                # 平均年齢は年齢分布から概算（加重平均）
+                age_dist = kpi_stats.get("age_distribution", {})
+                age_midpoints = {"20代": 25, "30代": 35, "40代": 45, "50代": 55, "60代": 65, "70歳以上": 75}
+                total_age_weighted = sum(age_dist.get(k, 0) * v for k, v in age_midpoints.items())
+                total_age_count = sum(age_dist.values())
+                avg_age_val = round(total_age_weighted / total_age_count, 1) if total_age_count > 0 else None
 
                 # === KPIカード（3列）：求職者数、平均年齢、男女比 ===
-                ui.label("KPI").classes("text-sm font-semibold mb-2").style(f"color: {MUTED_COLOR}")
+                ui.label(f"KPI（{kpi_label}）").classes("text-sm font-semibold mb-2").style(f"color: {MUTED_COLOR}")
                 with ui.row().classes("w-full gap-4"):
                     # 求職者数
                     with ui.card().classes("flex-1").style(
@@ -952,15 +980,6 @@ def dashboard_page() -> None:
                         gender_ratio_text = f"{male_total:,} / {female_total:,}" if (male_total > 0 or female_total > 0) else "-"
                         ui.label(gender_ratio_text).classes("text-2xl font-bold").style(f"color: {ACCENT_PINK}")
                         ui.label("人").classes("text-sm").style(f"color: {MUTED_COLOR}")
-
-                # === 3層比較パネル（全国・都道府県・市区町村） ===
-                pref_val = state["prefecture"] if state["prefecture"] != "全国" else None
-                muni_val = state["municipality"] if state["municipality"] != "すべて" else None
-
-                # db_helperから統計取得
-                nat_stats = get_national_stats()
-                pref_stats = get_prefecture_stats(pref_val) if pref_val else {}
-                muni_stats = get_municipality_stats(pref_val, muni_val) if pref_val and muni_val else {}
 
                 with ui.card().classes("w-full mt-4").style(
                     f"background-color: {CARD_BG}; border: 1px solid {BORDER_COLOR}; padding: 20px; border-radius: 12px"
@@ -2676,18 +2695,20 @@ def dashboard_page() -> None:
                 gender_val = state["talentmap_gender"] if state["talentmap_gender"] != "全て" else None
                 mode_val = state["talentmap_mode"]
 
-                # Leaflet地図
-                with ui.card().classes("w-full").style(
-                    f"background-color: {CARD_BG}; border: 1px solid {BORDER_COLOR}; border-radius: 12px; overflow: hidden"
-                ):
-                    japan_center = (36.5, 138.0)
-                    zoom_level = 5 if not pref else 8
+                # 地図と詳細サイドバーを横に配置
+                with ui.row().classes("w-full gap-4"):
+                    # 左側: 地図 (70%)
+                    with ui.card().style(
+                        f"background-color: {CARD_BG}; border: 1px solid {BORDER_COLOR}; border-radius: 12px; overflow: hidden; flex: 7"
+                    ):
+                        japan_center = (36.5, 138.0)
+                        zoom_level = 5 if not pref else 8
 
-                    # 地図コンテナ（position: relative はポリゴンSVGオーバーレイに必要）
-                    map_container = ui.element("div").classes("w-full").style("height: 500px; position: relative;")
-                    with map_container:
-                        map_widget = ui.leaflet(center=japan_center, zoom=zoom_level)
-                        map_widget.classes("w-full h-full")
+                        # 地図コンテナ（position: relative はポリゴンSVGオーバーレイに必要）
+                        map_container = ui.element("div").classes("w-full").style("height: 500px; position: relative;")
+                        with map_container:
+                            map_widget = ui.leaflet(center=japan_center, zoom=zoom_level)
+                            map_widget.classes("w-full h-full")
 
                     # マーカーデータ取得
                     markers_data = get_map_markers(pref)
@@ -2790,7 +2811,7 @@ def dashboard_page() -> None:
                                     fill_opacity = 0.6
                                     border_weight = 1
 
-                                # ポリゴンを追加
+                                # ポリゴンを追加（bubblingMouseEvents: trueでクリックを地図に伝播）
                                 if geometry.get("type") == "Polygon":
                                     coords = geometry["coordinates"][0]
                                     latlngs = [[c[1], c[0]] for c in coords]
@@ -2800,7 +2821,8 @@ def dashboard_page() -> None:
                                             "color": border_color,
                                             "fillColor": fill_color,
                                             "fillOpacity": fill_opacity,
-                                            "weight": border_weight
+                                            "weight": border_weight,
+                                            "bubblingMouseEvents": True
                                         }]
                                     )
                                     polygon_count += 1
@@ -2814,7 +2836,8 @@ def dashboard_page() -> None:
                                                 "color": border_color,
                                                 "fillColor": fill_color,
                                                 "fillOpacity": fill_opacity,
-                                                "weight": border_weight
+                                                "weight": border_weight,
+                                                "bubblingMouseEvents": True
                                             }]
                                         )
                                         polygon_count += 1
@@ -2880,7 +2903,12 @@ def dashboard_page() -> None:
                                     args=[[[(flow['from_lat'], flow['from_lng']), (flow['to_lat'], flow['to_lng'])]], {'color': '#3b82f6', 'weight': weight, 'opacity': 0.6}]
                                 )
 
-                        legend_items = ["マーカー: 市区町村の求職者数", "青線: 居住地→希望勤務地のフロー", "太い線ほど移動人数が多い"]
+                        legend_items = [
+                            "⚪ マーカー: 市区町村の求職者数",
+                            "  小(4px): ~200人、中(8px): ~400人、大(12px): 600人~",
+                            "━ フロー線: 居住地→希望勤務地",
+                            "  細(1px): ~100人、太(8px): 800人~"
+                        ]
                         data_summary = [f"表示マーカー: {len(markers_data) if markers_data else 0}件"]
 
                     elif mode_val == "流入元":
@@ -3045,6 +3073,126 @@ def dashboard_page() -> None:
                         else:
                             ui.label("都道府県を選択してください（居住地として分析）").style(f"color: {MUTED_COLOR}; padding: 20px")
                             legend_items = ["都道府県を選択すると競合地域が表示されます"]
+
+                    # 右サイドバー: 選択中市区町村の詳細情報 (flex: 3)
+                    with ui.card().style(
+                        f"background-color: {CARD_BG}; border: 1px solid {BORDER_COLOR}; border-radius: 12px; flex: 3; min-width: 280px; max-height: 540px; overflow-y: auto"
+                    ):
+                        selected_muni = state.get("municipality") if state.get("municipality") not in [None, "すべて", ""] else None
+
+                        if selected_muni and pref:
+                            # 選択中の市区町村の詳細情報を表示
+                            ui.label(f"📍 {selected_muni}").classes("text-lg font-bold mb-2").style(f"color: {PRIMARY_COLOR}")
+                            ui.separator().classes("mb-2")
+
+                            # 市区町村の基本データを取得
+                            muni_marker = next((m for m in markers_data if m.get('municipality') == selected_muni), None) if markers_data else None
+
+                            if muni_marker:
+                                # 基本情報
+                                with ui.element("div").classes("mb-3"):
+                                    ui.label("📊 基本情報").classes("font-bold mb-1").style(f"color: {TEXT_COLOR}")
+                                    ui.label(f"求職者数: {muni_marker.get('count', 0):,}人").style(f"color: {MUTED_COLOR}; font-size: 0.9rem")
+                                    if muni_marker.get('avg_age'):
+                                        ui.label(f"平均年齢: {muni_marker.get('avg_age', 0):.1f}歳").style(f"color: {MUTED_COLOR}; font-size: 0.9rem")
+
+                                # 流入・流出データ（モードに応じて）
+                                if mode_val in ["流入元", "流出/流入バランス"]:
+                                    inflow = muni_marker.get('inflow', 0)
+                                    outflow = muni_marker.get('outflow', 0)
+                                    net_flow = inflow - outflow
+
+                                    with ui.element("div").classes("mb-3"):
+                                        ui.label("🔄 人材フロー").classes("font-bold mb-1").style(f"color: {TEXT_COLOR}")
+                                        ui.label(f"流入: {inflow:,}人").style(f"color: #22c55e; font-size: 0.9rem")
+                                        ui.label(f"流出: {outflow:,}人").style(f"color: #ef4444; font-size: 0.9rem")
+                                        net_color = "#22c55e" if net_flow >= 0 else "#ef4444"
+                                        ui.label(f"収支: {net_flow:+,}人").style(f"color: {net_color}; font-size: 0.9rem; font-weight: bold")
+
+                                # 詳細データを取得（db_helperから）
+                                try:
+                                    from db_helper import get_municipality_detail
+                                    detail = get_municipality_detail(pref, selected_muni)
+                                    if detail:
+                                        # 年齢構成（人口ピラミッド形式）
+                                        if detail.get('age_gender_pyramid'):
+                                            with ui.element("div").classes("mb-3"):
+                                                ui.label("👥 年齢×性別構成").classes("font-bold mb-1").style(f"color: {TEXT_COLOR}")
+                                                pyramid = detail['age_gender_pyramid']
+                                                # 年齢順にソート
+                                                age_order = ['20代', '30代', '40代', '50代', '60代', '70歳以上']
+                                                sorted_ages = [a for a in age_order if a in pyramid]
+                                                # 最大値を計算（バーの長さ正規化用）
+                                                max_count = max(
+                                                    max(v.get('male', 0), v.get('female', 0))
+                                                    for v in pyramid.values()
+                                                ) if pyramid else 1
+                                                # ピラミッド表示（男性左、女性右）
+                                                with ui.element("div").style("font-family: monospace; font-size: 0.75rem"):
+                                                    # ヘッダー
+                                                    ui.html(f'<div style="display: flex; justify-content: space-between; color: {MUTED_COLOR}; margin-bottom: 4px;"><span style="color: #60a5fa">♂男性</span><span style="color: #f472b6">♀女性</span></div>', sanitize=False)
+                                                    for age in sorted_ages:
+                                                        data = pyramid.get(age, {'male': 0, 'female': 0})
+                                                        male = data.get('male', 0)
+                                                        female = data.get('female', 0)
+                                                        # バーの長さを計算（最大10文字）
+                                                        male_bar_len = int((male / max_count) * 8) if max_count > 0 else 0
+                                                        female_bar_len = int((female / max_count) * 8) if max_count > 0 else 0
+                                                        male_bar = '█' * male_bar_len
+                                                        female_bar = '█' * female_bar_len
+                                                        # 人口ピラミッド形式で表示
+                                                        ui.html(f'''
+                                                            <div style="display: flex; align-items: center; margin: 2px 0; color: {MUTED_COLOR}">
+                                                                <span style="width: 55px; text-align: right; color: #60a5fa; font-size: 0.7rem">{male:,}</span>
+                                                                <span style="width: 70px; text-align: right; color: #60a5fa">{male_bar}</span>
+                                                                <span style="width: 50px; text-align: center; font-weight: bold; font-size: 0.7rem">{age}</span>
+                                                                <span style="width: 70px; text-align: left; color: #f472b6">{female_bar}</span>
+                                                                <span style="width: 55px; text-align: left; color: #f472b6; font-size: 0.7rem">{female:,}</span>
+                                                            </div>
+                                                        ''', sanitize=False)
+                                                    # 合計表示
+                                                    total_male = sum(v.get('male', 0) for v in pyramid.values())
+                                                    total_female = sum(v.get('female', 0) for v in pyramid.values())
+                                                    ui.html(f'''
+                                                        <div style="display: flex; justify-content: space-between; margin-top: 6px; padding-top: 4px; border-top: 1px solid {BORDER_COLOR}; color: {TEXT_COLOR}; font-size: 0.75rem">
+                                                            <span style="color: #60a5fa">計 {total_male:,}人</span>
+                                                            <span style="color: #f472b6">計 {total_female:,}人</span>
+                                                        </div>
+                                                    ''', sanitize=False)
+                                        elif detail.get('age_distribution'):
+                                            # フォールバック: 性別なしの年齢分布
+                                            with ui.element("div").classes("mb-3"):
+                                                ui.label("👥 年齢構成").classes("font-bold mb-1").style(f"color: {TEXT_COLOR}")
+                                                age_dist = detail['age_distribution']
+                                                for age_group, count in sorted(age_dist.items()):
+                                                    total = sum(age_dist.values())
+                                                    pct = (count / total * 100) if total > 0 else 0
+                                                    ui.label(f"{age_group}: {count}人 ({pct:.0f}%)").style(f"color: {MUTED_COLOR}; font-size: 0.85rem")
+
+                                        # 雇用形態分布
+                                        if detail.get('workstyle_distribution'):
+                                            with ui.element("div").classes("mb-3"):
+                                                ui.label("💼 希望雇用形態").classes("font-bold mb-1").style(f"color: {TEXT_COLOR}")
+                                                ws_dist = detail['workstyle_distribution']
+                                                for ws, count in sorted(ws_dist.items(), key=lambda x: -x[1])[:5]:
+                                                    total = sum(ws_dist.values())
+                                                    pct = (count / total * 100) if total > 0 else 0
+                                                    ui.label(f"{ws}: {count}人 ({pct:.0f}%)").style(f"color: {MUTED_COLOR}; font-size: 0.85rem")
+                                except Exception as e:
+                                    print(f"[SIDEBAR] get_municipality_detail error: {e}")
+                            else:
+                                ui.label("この市区町村のデータがありません").style(f"color: {MUTED_COLOR}")
+                        else:
+                            # 市区町村未選択時
+                            ui.label("📍 市区町村詳細").classes("text-lg font-bold mb-2").style(f"color: {TEXT_COLOR}")
+                            ui.separator().classes("mb-2")
+                            ui.label("地図上で市区町村をクリックすると").style(f"color: {MUTED_COLOR}; font-size: 0.9rem")
+                            ui.label("詳細情報が表示されます").style(f"color: {MUTED_COLOR}; font-size: 0.9rem")
+                            ui.element("div").classes("my-4")
+                            ui.label("💡 ヒント").classes("font-bold").style(f"color: {TEXT_COLOR}")
+                            ui.label("• ポリゴンをクリックで選択").style(f"color: {MUTED_COLOR}; font-size: 0.85rem")
+                            ui.label("• 表示モードで分析切替").style(f"color: {MUTED_COLOR}; font-size: 0.85rem")
+                            ui.label("• フィルタで絞り込み可能").style(f"color: {MUTED_COLOR}; font-size: 0.85rem")
 
                 # 凡例・統計（動的更新対応）
                 with ui.row().classes("w-full gap-4 mt-4"):

@@ -393,7 +393,7 @@ def _turso_http_query(sql: str, params: list = None, max_retries: int = 2) -> tu
     last_error = None
     for attempt in range(max_retries + 1):
         try:
-            with httpx.Client(timeout=10.0) as client:
+            with httpx.Client(timeout=30.0) as client:
                 response = client.post(
                     f'{http_url}/v2/pipeline',
                     headers=headers,
@@ -450,6 +450,78 @@ def _turso_http_query(sql: str, params: list = None, max_retries: int = 2) -> tu
     raise last_error if last_error else Exception("Turso query failed")
 
 
+def _turso_batch_query(queries: list) -> list:
+    """複数クエリをバッチ実行（1回のHTTP通信で3クエリ → パフォーマンス3倍改善）
+
+    Args:
+        queries: [(sql, params), (sql, params), ...] のリスト
+
+    Returns:
+        list: 各クエリの結果をpd.DataFrameのリストで返す
+    """
+    if not queries:
+        return []
+
+    http_url = TURSO_DATABASE_URL
+    if http_url.startswith('libsql://'):
+        http_url = http_url.replace('libsql://', 'https://')
+
+    headers = {
+        'Authorization': f'Bearer {TURSO_AUTH_TOKEN}',
+        'Content-Type': 'application/json'
+    }
+
+    # 複数ステートメントを1リクエストにまとめる
+    requests_list = []
+    for sql, params in queries:
+        stmt = {'sql': sql}
+        if params:
+            stmt['args'] = _build_turso_args(list(params) if params else None)
+        requests_list.append({'type': 'execute', 'stmt': stmt})
+
+    payload = {'requests': requests_list}
+
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            response = client.post(
+                f'{http_url}/v2/pipeline',
+                headers=headers,
+                json=payload
+            )
+
+            if response.status_code != 200:
+                print(f"[Turso Batch] HTTP {response.status_code}")
+                return [pd.DataFrame() for _ in queries]
+
+            data = response.json()
+
+        results = []
+        for i, result in enumerate(data.get('results', [])):
+            if result.get('type') == 'error':
+                print(f"[Turso Batch] Query {i} error: {result.get('error', {}).get('message', 'Unknown')}")
+                results.append(pd.DataFrame())
+                continue
+
+            resp = result.get('response', {}).get('result', {})
+            columns = [c['name'] for c in resp.get('cols', [])]
+
+            rows = []
+            for row in resp.get('rows', []):
+                row_dict = {}
+                for j, col in enumerate(columns):
+                    val = row[j]
+                    row_dict[col] = val.get('value') if isinstance(val, dict) else val
+                rows.append(row_dict)
+
+            results.append(pd.DataFrame(rows, columns=columns) if rows else pd.DataFrame())
+
+        return results
+
+    except Exception as e:
+        print(f"[Turso Batch] Error: {e}")
+        return [pd.DataFrame() for _ in queries]
+
+
 async def _turso_async_query(sql: str, params: list = None, max_retries: int = 2) -> tuple:
     """Turso非同期クエリ実行（httpx.AsyncClient使用）
 
@@ -482,7 +554,7 @@ async def _turso_async_query(sql: str, params: list = None, max_retries: int = 2
     last_error = None
     for attempt in range(max_retries + 1):
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(
                     f'{http_url}/v2/pipeline',
                     headers=headers,
@@ -1149,9 +1221,12 @@ def _batch_stats_query(prefecture: str = None, municipality: str = None) -> dict
     try:
         # 3. フォールバック: DBから必要カラムのみ取得（タイムアウト回避）
         # 詳細データはバックグラウンドプリロード完了後に利用可能
+        # age_groupはデータベースに存在しないため削除（2025-12-29 修正）
+        # RESIDENCE_FLOW用にdesired_prefecture/desired_municipality追加（2025-12-29 修正）
         BATCH_COLUMNS = """row_type, prefecture, municipality,
             avg_desired_areas, avg_qualifications, male_count, female_count,
-            avg_reference_distance_km, category1, age_group, count, applicant_count"""
+            avg_reference_distance_km, category1, count, applicant_count,
+            desired_prefecture, desired_municipality"""
 
         conditions = ["row_type IN ('SUMMARY', 'RESIDENCE_FLOW', 'AGE_GENDER')"]
         params = []
@@ -1430,7 +1505,8 @@ def get_national_stats() -> dict:
         # フォールバック: AGE_GENDERも空の場合、個別クエリ（メモリ最適化）
         if df_age.empty:
             try:
-                df_age = query_df("SELECT prefecture, municipality, category1, age_group, count, applicant_count FROM job_seeker_data WHERE row_type = 'AGE_GENDER'")
+                # age_groupはデータベースに存在しないため削除（2025-12-29 修正）
+                df_age = query_df("SELECT prefecture, municipality, category1, count, applicant_count FROM job_seeker_data WHERE row_type = 'AGE_GENDER'")
                 print(f"[DEBUG] Fallback AGE_GENDER query: {len(df_age)} rows", flush=True)
             except Exception as age_err:
                 print(f"[DEBUG] Fallback AGE_GENDER query failed: {age_err}", flush=True)
@@ -2652,22 +2728,29 @@ def get_workstyle_distribution(prefecture: str = None, municipality: str = None)
     Returns:
         DataFrame: columns=[workstyle, count, percentage]
     """
+    print(f"[DB] get_workstyle_distribution called: pref={prefecture}, muni={municipality}")
     try:
         if USE_CSV_MODE:
             df = _load_csv_data()
             filtered = df[df['row_type'] == 'WORKSTYLE_DISTRIBUTION']
         else:
-            sql = "SELECT * FROM job_seeker_data WHERE row_type = 'WORKSTYLE_DISTRIBUTION'"
-            filtered = query_df(sql)
+            # SQLレベルでフィルタリング（効率化）
+            conditions = ["row_type = 'WORKSTYLE_DISTRIBUTION'"]
+            params = []
+            if prefecture:
+                conditions.append("prefecture = ?")
+                params.append(prefecture)
+            if municipality:
+                conditions.append("municipality = ?")
+                params.append(municipality)
+            sql = f"SELECT * FROM job_seeker_data WHERE {' AND '.join(conditions)}"
+            filtered = query_df(sql, tuple(params) if params else None)
 
-        if filtered.empty:
-            return pd.DataFrame()
-
-        # フィルタリング
-        if prefecture:
-            filtered = filtered[filtered['prefecture'] == prefecture]
-        if municipality:
-            filtered = filtered[filtered['municipality'] == municipality]
+        print(f"[DB] get_workstyle_distribution: {len(filtered)} rows after query")
+        if not filtered.empty:
+            print(f"[DB] WORKSTYLE_DISTRIBUTION columns: {list(filtered.columns)}")
+            prefs = filtered['prefecture'].unique()[:5].tolist() if 'prefecture' in filtered.columns else []
+            print(f"[DB] Sample prefectures: {prefs}")
 
         if filtered.empty:
             return pd.DataFrame()
@@ -2700,23 +2783,29 @@ def get_workstyle_age_cross(prefecture: str = None, municipality: str = None) ->
     Returns:
         DataFrame: columns=[workstyle, age_group, count, row_pct, col_pct]
     """
+    print(f"[DB] get_workstyle_age_cross called: pref={prefecture}, muni={municipality}")
     try:
         if USE_CSV_MODE:
             df = _load_csv_data()
             filtered = df[df['row_type'] == 'WORKSTYLE_AGE_CROSS']
+            if prefecture:
+                filtered = filtered[filtered['prefecture'] == prefecture]
+            if municipality:
+                filtered = filtered[filtered['municipality'] == municipality]
         else:
-            sql = "SELECT * FROM job_seeker_data WHERE row_type = 'WORKSTYLE_AGE_CROSS'"
-            filtered = query_df(sql)
+            # SQLレベルでフィルタリング
+            conditions = ["row_type = 'WORKSTYLE_AGE_CROSS'"]
+            params = []
+            if prefecture:
+                conditions.append("prefecture = ?")
+                params.append(prefecture)
+            if municipality:
+                conditions.append("municipality = ?")
+                params.append(municipality)
+            sql = f"SELECT * FROM job_seeker_data WHERE {' AND '.join(conditions)}"
+            filtered = query_df(sql, tuple(params) if params else None)
 
-        if filtered.empty:
-            return pd.DataFrame()
-
-        # フィルタリング
-        if prefecture:
-            filtered = filtered[filtered['prefecture'] == prefecture]
-        if municipality:
-            filtered = filtered[filtered['municipality'] == municipality]
-
+        print(f"[DB] get_workstyle_age_cross: {len(filtered)} rows")
         if filtered.empty:
             return pd.DataFrame()
 
@@ -2747,23 +2836,29 @@ def get_workstyle_gender_cross(prefecture: str = None, municipality: str = None)
     Returns:
         DataFrame: columns=[workstyle, gender, count, row_pct, col_pct]
     """
+    print(f"[DB] get_workstyle_gender_cross called: pref={prefecture}, muni={municipality}")
     try:
         if USE_CSV_MODE:
             df = _load_csv_data()
             filtered = df[df['row_type'] == 'WORKSTYLE_GENDER_CROSS']
+            if prefecture:
+                filtered = filtered[filtered['prefecture'] == prefecture]
+            if municipality:
+                filtered = filtered[filtered['municipality'] == municipality]
         else:
-            sql = "SELECT * FROM job_seeker_data WHERE row_type = 'WORKSTYLE_GENDER_CROSS'"
-            filtered = query_df(sql)
+            # SQLレベルでフィルタリング
+            conditions = ["row_type = 'WORKSTYLE_GENDER_CROSS'"]
+            params = []
+            if prefecture:
+                conditions.append("prefecture = ?")
+                params.append(prefecture)
+            if municipality:
+                conditions.append("municipality = ?")
+                params.append(municipality)
+            sql = f"SELECT * FROM job_seeker_data WHERE {' AND '.join(conditions)}"
+            filtered = query_df(sql, tuple(params) if params else None)
 
-        if filtered.empty:
-            return pd.DataFrame()
-
-        # フィルタリング
-        if prefecture:
-            filtered = filtered[filtered['prefecture'] == prefecture]
-        if municipality:
-            filtered = filtered[filtered['municipality'] == municipality]
-
+        print(f"[DB] get_workstyle_gender_cross: {len(filtered)} rows")
         if filtered.empty:
             return pd.DataFrame()
 
@@ -2794,23 +2889,29 @@ def get_workstyle_urgency_cross(prefecture: str = None, municipality: str = None
     Returns:
         DataFrame: columns=[workstyle, urgency, count, row_pct, col_pct]
     """
+    print(f"[DB] get_workstyle_urgency_cross called: pref={prefecture}, muni={municipality}")
     try:
         if USE_CSV_MODE:
             df = _load_csv_data()
             filtered = df[df['row_type'] == 'WORKSTYLE_URGENCY']
+            if prefecture:
+                filtered = filtered[filtered['prefecture'] == prefecture]
+            if municipality:
+                filtered = filtered[filtered['municipality'] == municipality]
         else:
-            sql = "SELECT * FROM job_seeker_data WHERE row_type = 'WORKSTYLE_URGENCY'"
-            filtered = query_df(sql)
+            # SQLレベルでフィルタリング
+            conditions = ["row_type = 'WORKSTYLE_URGENCY'"]
+            params = []
+            if prefecture:
+                conditions.append("prefecture = ?")
+                params.append(prefecture)
+            if municipality:
+                conditions.append("municipality = ?")
+                params.append(municipality)
+            sql = f"SELECT * FROM job_seeker_data WHERE {' AND '.join(conditions)}"
+            filtered = query_df(sql, tuple(params) if params else None)
 
-        if filtered.empty:
-            return pd.DataFrame()
-
-        # フィルタリング
-        if prefecture:
-            filtered = filtered[filtered['prefecture'] == prefecture]
-        if municipality:
-            filtered = filtered[filtered['municipality'] == municipality]
-
+        print(f"[DB] get_workstyle_urgency_cross: {len(filtered)} rows")
         if filtered.empty:
             return pd.DataFrame()
 
@@ -2841,23 +2942,29 @@ def get_workstyle_employment_cross(prefecture: str = None, municipality: str = N
     Returns:
         DataFrame: columns=[workstyle, employment_status, count, row_pct, col_pct]
     """
+    print(f"[DB] get_workstyle_employment_cross called: pref={prefecture}, muni={municipality}")
     try:
         if USE_CSV_MODE:
             df = _load_csv_data()
             filtered = df[df['row_type'] == 'WORKSTYLE_EMPLOYMENT_STATUS']
+            if prefecture:
+                filtered = filtered[filtered['prefecture'] == prefecture]
+            if municipality:
+                filtered = filtered[filtered['municipality'] == municipality]
         else:
-            sql = "SELECT * FROM job_seeker_data WHERE row_type = 'WORKSTYLE_EMPLOYMENT_STATUS'"
-            filtered = query_df(sql)
+            # SQLレベルでフィルタリング
+            conditions = ["row_type = 'WORKSTYLE_EMPLOYMENT_STATUS'"]
+            params = []
+            if prefecture:
+                conditions.append("prefecture = ?")
+                params.append(prefecture)
+            if municipality:
+                conditions.append("municipality = ?")
+                params.append(municipality)
+            sql = f"SELECT * FROM job_seeker_data WHERE {' AND '.join(conditions)}"
+            filtered = query_df(sql, tuple(params) if params else None)
 
-        if filtered.empty:
-            return pd.DataFrame()
-
-        # フィルタリング
-        if prefecture:
-            filtered = filtered[filtered['prefecture'] == prefecture]
-        if municipality:
-            filtered = filtered[filtered['municipality'] == municipality]
-
+        print(f"[DB] get_workstyle_employment_cross: {len(filtered)} rows")
         if filtered.empty:
             return pd.DataFrame()
 
@@ -2888,23 +2995,29 @@ def get_workstyle_area_count_cross(prefecture: str = None, municipality: str = N
     Returns:
         DataFrame: columns=[workstyle, area_count_group, count, row_pct, col_pct]
     """
+    print(f"[DB] get_workstyle_area_count_cross called: pref={prefecture}, muni={municipality}")
     try:
         if USE_CSV_MODE:
             df = _load_csv_data()
             filtered = df[df['row_type'] == 'WORKSTYLE_DESIRED_AREA_COUNT']
+            if prefecture:
+                filtered = filtered[filtered['prefecture'] == prefecture]
+            if municipality:
+                filtered = filtered[filtered['municipality'] == municipality]
         else:
-            sql = "SELECT * FROM job_seeker_data WHERE row_type = 'WORKSTYLE_DESIRED_AREA_COUNT'"
-            filtered = query_df(sql)
+            # SQLレベルでフィルタリング
+            conditions = ["row_type = 'WORKSTYLE_DESIRED_AREA_COUNT'"]
+            params = []
+            if prefecture:
+                conditions.append("prefecture = ?")
+                params.append(prefecture)
+            if municipality:
+                conditions.append("municipality = ?")
+                params.append(municipality)
+            sql = f"SELECT * FROM job_seeker_data WHERE {' AND '.join(conditions)}"
+            filtered = query_df(sql, tuple(params) if params else None)
 
-        if filtered.empty:
-            return pd.DataFrame()
-
-        # フィルタリング
-        if prefecture:
-            filtered = filtered[filtered['prefecture'] == prefecture]
-        if municipality:
-            filtered = filtered[filtered['municipality'] == municipality]
-
+        print(f"[DB] get_workstyle_area_count_cross: {len(filtered)} rows")
         if filtered.empty:
             return pd.DataFrame()
 
@@ -3229,9 +3342,11 @@ def get_flow_lines(prefecture: str = None) -> list:
             return []
 
         if prefecture and prefecture != "全国":
+            # 居住地または希望勤務地が対象都道府県のデータを抽出
+            # prefecture = 居住地都道府県, desired_prefecture = 希望勤務地都道府県
             filtered = filtered[
                 (filtered['prefecture'] == prefecture) |
-                (filtered['category1'] == prefecture)
+                (filtered['desired_prefecture'] == prefecture)
             ]
 
         if filtered.empty:
@@ -3253,11 +3368,12 @@ def get_flow_lines(prefecture: str = None) -> list:
                     continue
 
         # フローデータ生成
+        # prefecture = 居住地（フロー元）, desired_prefecture = 希望勤務地（フロー先）
         flows = []
         for _, row in filtered.iterrows():
             try:
                 from_pref = row.get('prefecture', '')
-                to_pref = row.get('category1', '')
+                to_pref = row.get('desired_prefecture', '')  # 修正: category1ではなくdesired_prefecture
                 count = int(float(row.get('count', 0) or 0))
 
                 if from_pref in pref_coords and to_pref in pref_coords and from_pref != to_pref:
@@ -3321,19 +3437,22 @@ def get_inflow_sources(
             return []
 
         # 希望勤務地（target）でフィルタ
-        # desired_prefectureが希望勤務地（都道府県）
+        # desired_prefecture = 希望勤務地都道府県（必須カラム）
+        # 注: category1は年齢層であり、都道府県ではないためfallbackとして使用不可
         if 'desired_prefecture' in filtered.columns:
             filtered = filtered[filtered['desired_prefecture'] == target_prefecture]
-        elif 'category1' in filtered.columns:
-            # フォールバック: 旧形式対応
-            filtered = filtered[filtered['category1'] == target_prefecture]
+        else:
+            print(f"[DB] get_inflow_sources: desired_prefecture column not found")
+            return []
 
         if target_municipality and target_municipality != "全て":
-            # desired_municipalityが希望勤務地（市区町村）
+            # desired_municipality = 希望勤務地市区町村（必須カラム）
+            # 注: category2は性別であり、市区町村ではないためfallbackとして使用不可
             if 'desired_municipality' in filtered.columns:
                 filtered = filtered[filtered['desired_municipality'] == target_municipality]
-            elif 'category2' in filtered.columns:
-                filtered = filtered[filtered['category2'] == target_municipality]
+            else:
+                print(f"[DB] get_inflow_sources: desired_municipality column not found")
+                return []
 
         # 属性フィルタ（category1=年齢層, category2=性別）
         if age_group and age_group != "全て" and 'category1' in filtered.columns:
@@ -3440,19 +3559,20 @@ def get_flow_balance(
         if flow_df.empty:
             return []
 
-        # 属性フィルタ
+        # 属性フィルタ（category1=年齢層, category2=性別）
         if workstyle and workstyle != "全て" and 'workstyle' in flow_df.columns:
             flow_df = flow_df[flow_df['workstyle'] == workstyle]
-        if age_group and age_group != "全て" and 'age_group' in flow_df.columns:
-            flow_df = flow_df[flow_df['age_group'] == age_group]
-        if gender and gender != "全て" and 'gender' in flow_df.columns:
-            flow_df = flow_df[flow_df['gender'] == gender]
+        if age_group and age_group != "全て" and 'category1' in flow_df.columns:
+            flow_df = flow_df[flow_df['category1'] == age_group]  # 修正: age_group -> category1
+        if gender and gender != "全て" and 'category2' in flow_df.columns:
+            flow_df = flow_df[flow_df['category2'] == gender]  # 修正: gender -> category2
 
         if prefecture and prefecture != "全国":
             # 居住地または希望勤務地が対象都道府県
+            # prefecture = 居住地, desired_prefecture = 希望勤務地
             flow_df = flow_df[
                 (flow_df['prefecture'] == prefecture) |
-                (flow_df['category1'] == prefecture)
+                (flow_df['desired_prefecture'] == prefecture)  # 修正: category1 -> desired_prefecture
             ]
 
         if flow_df.empty:
@@ -3466,9 +3586,10 @@ def get_flow_balance(
         }).reset_index()
         outflow_grouped = outflow_grouped.rename(columns={'count': 'outflow'})
 
-        # 流入: 希望勤務地（category1, category2）に来る
+        # 流入: 希望勤務地（desired_prefecture, desired_municipality）に来る
+        # 修正: category1/category2は年齢層/性別であり、地域ではない
         inflow_df = flow_df.copy()
-        inflow_df = inflow_df.rename(columns={'category1': 'target_pref', 'category2': 'target_muni'})
+        inflow_df = inflow_df.rename(columns={'desired_prefecture': 'target_pref', 'desired_municipality': 'target_muni'})
         inflow_grouped = inflow_df.groupby(['target_pref', 'target_muni']).agg({
             'count': 'sum'
         }).reset_index()
@@ -3604,9 +3725,12 @@ def get_competing_areas(
         if total_count == 0:
             return []
 
-        # 希望勤務地カラムを特定
-        desired_pref_col = 'desired_prefecture' if 'desired_prefecture' in filtered.columns else 'category1'
-        desired_muni_col = 'desired_municipality' if 'desired_municipality' in filtered.columns else 'category2'
+        # 希望勤務地カラムを特定（RESIDENCE_FLOWは常にdesired_*カラムを持つ）
+        if 'desired_prefecture' not in filtered.columns or 'desired_municipality' not in filtered.columns:
+            print(f"[DB] get_competing_areas: Required columns (desired_prefecture/desired_municipality) not found")
+            return []
+        desired_pref_col = 'desired_prefecture'
+        desired_muni_col = 'desired_municipality'
 
         # 希望勤務地別に集計
         grouped = filtered.groupby([desired_pref_col, desired_muni_col]).agg({
@@ -3887,6 +4011,137 @@ def get_preloaded_data(prefecture: str = None, row_type: str = None) -> pd.DataF
 def is_preload_ready() -> bool:
     """事前ロードが完了しているかどうか"""
     return _preload_status["loaded"]
+
+
+def get_municipality_detail(prefecture: str, municipality: str) -> dict:
+    """市区町村の詳細情報を取得（人材地図サイドバー用）
+
+    パフォーマンス最適化（2025-12-29）:
+    - 3つの個別クエリ → 1回のバッチクエリ（HTTP通信1/3に削減）
+    - 期待改善: 1.8秒 → 0.6秒
+
+    Args:
+        prefecture: 都道府県名
+        municipality: 市区町村名
+
+    Returns:
+        dict: {
+            'age_distribution': {'20代': 100, '30代': 150, ...},
+            'age_gender_pyramid': {'20代': {'male': 50, 'female': 50}, ...},
+            'workstyle_distribution': {'正職員': 200, 'パート': 100, ...},
+            'gender_ratio': {'male': 120, 'female': 280},
+            'avg_age': 45.2,
+            'avg_qualifications': 1.5,
+        }
+    """
+    if not prefecture or not municipality:
+        return {}
+
+    try:
+        import time
+        start_time = time.time()
+        result = {}
+
+        # 3つのクエリを定義
+        age_gender_sql = """
+            SELECT category1 as age_group, category2 as gender, SUM(count) as total
+            FROM job_seeker_data
+            WHERE row_type = 'AGE_GENDER'
+              AND prefecture = ?
+              AND municipality = ?
+              AND category1 IS NOT NULL
+              AND category2 IS NOT NULL
+            GROUP BY category1, category2
+        """
+
+        ws_sql = """
+            SELECT category1 as workstyle, SUM(count) as total
+            FROM job_seeker_data
+            WHERE row_type = 'WORKSTYLE_DISTRIBUTION'
+              AND prefecture = ?
+              AND municipality = ?
+              AND category1 IS NOT NULL
+            GROUP BY category1
+        """
+
+        summary_sql = """
+            SELECT male_count, female_count, avg_age, avg_qualifications
+            FROM job_seeker_data
+            WHERE row_type = 'SUMMARY'
+              AND prefecture = ?
+              AND municipality = ?
+            LIMIT 1
+        """
+
+        # Tursoの場合はバッチクエリで1回のHTTP通信
+        db_type = get_db_type()
+        if db_type == "turso":
+            queries = [
+                (age_gender_sql, (prefecture, municipality)),
+                (ws_sql, (prefecture, municipality)),
+                (summary_sql, (prefecture, municipality)),
+            ]
+            dfs = _turso_batch_query(queries)
+            age_gender_df = dfs[0] if len(dfs) > 0 else pd.DataFrame()
+            ws_df = dfs[1] if len(dfs) > 1 else pd.DataFrame()
+            summary_df = dfs[2] if len(dfs) > 2 else pd.DataFrame()
+        else:
+            # SQLite/PostgreSQL用（従来通り個別クエリ）
+            age_gender_df = query_df(age_gender_sql, (prefecture, municipality))
+            ws_df = query_df(ws_sql, (prefecture, municipality))
+            summary_df = query_df(summary_sql, (prefecture, municipality))
+
+        # 年齢×性別データの処理
+        if not age_gender_df.empty:
+            result['age_gender_pyramid'] = {}
+            result['age_distribution'] = {}
+            for _, row in age_gender_df.iterrows():
+                age_group = row.get('age_group', '')
+                gender = row.get('gender', '')
+                total = int(row.get('total', 0) or 0)
+                if age_group and gender and total > 0:
+                    if age_group not in result['age_gender_pyramid']:
+                        result['age_gender_pyramid'][age_group] = {'male': 0, 'female': 0}
+                    if '男' in gender:
+                        result['age_gender_pyramid'][age_group]['male'] = total
+                    elif '女' in gender:
+                        result['age_gender_pyramid'][age_group]['female'] = total
+                    if age_group not in result['age_distribution']:
+                        result['age_distribution'][age_group] = 0
+                    result['age_distribution'][age_group] += total
+
+        # 雇用形態分布の処理
+        if not ws_df.empty:
+            result['workstyle_distribution'] = {}
+            for _, row in ws_df.iterrows():
+                workstyle = row.get('workstyle', '')
+                total = int(row.get('total', 0) or 0)
+                if workstyle and total > 0:
+                    result['workstyle_distribution'][workstyle] = total
+
+        # 性別比率と基本統計の処理
+        if not summary_df.empty:
+            row = summary_df.iloc[0]
+            male = int(float(row.get('male_count', 0) or 0))
+            female = int(float(row.get('female_count', 0) or 0))
+            if male > 0 or female > 0:
+                result['gender_ratio'] = {'male': male, 'female': female}
+            avg_age = row.get('avg_age')
+            if avg_age is not None and not pd.isna(avg_age):
+                result['avg_age'] = float(avg_age)
+            avg_qual = row.get('avg_qualifications')
+            if avg_qual is not None and not pd.isna(avg_qual):
+                result['avg_qualifications'] = float(avg_qual)
+
+        elapsed = time.time() - start_time
+        print(f"[DB] get_municipality_detail: {prefecture}/{municipality} -> {len(result)} sections ({elapsed:.2f}s)")
+        return result
+
+    except Exception as e:
+        print(f"[DB] get_municipality_detail error: {e}")
+        import traceback
+        traceback.print_exc()
+        return {}
 
 
 if __name__ == "__main__":
