@@ -49,6 +49,11 @@ try:
         get_urgency_gender_data,
         get_urgency_start_category_data,
         PREFECTURE_ORDER as DB_PREFECTURE_ORDER,
+        # バックグラウンド事前ロード関数
+        start_background_preload,
+        get_preload_status,
+        get_preloaded_data,
+        is_preload_ready,
     )
     _DB_HELPER_AVAILABLE = True
     print("[STARTUP] db_helper.py loaded successfully")
@@ -315,8 +320,7 @@ def query_turso(sql: str) -> pd.DataFrame:
 def load_data() -> pd.DataFrame:
     """Load data from Turso first, then fallback to CSV; cache the result.
 
-    メモリ最適化: ドロップダウン表示に必要な最小限のカラムのみをロード
-    （他のデータはdb_helper経由でオンデマンド取得）
+    全カラム取得: バックグラウンド事前ロードと連携し、2GB RAMを活用
     """
     global _dataframe, _data_source
     print("[DATA] load_data() called", flush=True)
@@ -324,41 +328,47 @@ def load_data() -> pd.DataFrame:
         print("[DATA] Returning cached dataframe", flush=True)
         return _dataframe
 
-    # メモリ最適化: ドロップダウンに必要な最小限のカラムのみ取得
-    # 全カラム取得を避けてメモリ使用量を大幅削減（Render 512MB対応）
-    ESSENTIAL_COLUMNS = "prefecture, municipality, row_type"
+    # 事前ロードキャッシュをチェック（バックグラウンドロード完了時）
+    if _DB_HELPER_AVAILABLE:
+        try:
+            preloaded = get_preloaded_data(row_type='SUMMARY')
+            if not preloaded.empty:
+                _dataframe = preloaded
+                _data_source = "Preload Cache"
+                print(f"[DATA] Using preload cache: {len(_dataframe):,} rows", flush=True)
+                return _dataframe
+        except Exception as e:
+            print(f"[DATA] Preload cache check failed: {e}", flush=True)
 
     print(f"[DATA] TURSO_DATABASE_URL: {bool(TURSO_DATABASE_URL)}, TURSO_AUTH_TOKEN: {bool(TURSO_AUTH_TOKEN)}", flush=True)
     if TURSO_DATABASE_URL and TURSO_AUTH_TOKEN:
         try:
-            print("[DATA] Attempting Turso load (optimized columns)...", flush=True)
-            log("[DATA] Loading from Turso (SUMMARY only, optimized columns)...")
-            _dataframe = query_turso(f"SELECT {ESSENTIAL_COLUMNS} FROM job_seeker_data WHERE row_type = 'SUMMARY'")
+            print("[DATA] Attempting Turso load (all columns)...", flush=True)
+            log("[DATA] Loading from Turso (SUMMARY only, all columns)...")
+            # 全カラム取得（2GB RAMがあるので問題なし）
+            _dataframe = query_turso("SELECT * FROM job_seeker_data WHERE row_type = 'SUMMARY'")
             _data_source = "Turso DB"
             print(f"[DATA] Turso SUCCESS: {len(_dataframe):,} rows", flush=True)
-            log(f"[DATA] Loaded {len(_dataframe):,} rows from Turso (optimized)")
+            log(f"[DATA] Loaded {len(_dataframe):,} rows from Turso")
             return _dataframe
         except Exception as exc:
             print(f"[DATA] Turso FAILED: {type(exc).__name__}: {exc}", flush=True)
             log(f"[DATA] Turso failed: {type(exc).__name__}: {exc}")
             log("[DATA] Falling back to CSV...")
 
-    # CSVフォールバック: 必要カラムのみ読み込み（メモリ最適化）
-    essential_cols_list = ["prefecture", "municipality", "row_type"]
+    # CSVフォールバック: 全カラム読み込み
     for path in [CSV_PATH_GZ, CSV_PATH, CSV_PATH_ALT]:
         if path.exists():
-            log(f"[DATA] Loading from CSV: {path} (optimized columns)")
+            log(f"[DATA] Loading from CSV: {path} (all columns)")
             if path.suffix == ".gz":
-                _dataframe = pd.read_csv(path, encoding="utf-8-sig", compression="gzip",
-                                         usecols=lambda c: c in essential_cols_list, low_memory=True)
+                _dataframe = pd.read_csv(path, encoding="utf-8-sig", compression="gzip", low_memory=False)
             else:
-                _dataframe = pd.read_csv(path, encoding="utf-8-sig",
-                                         usecols=lambda c: c in essential_cols_list, low_memory=True)
+                _dataframe = pd.read_csv(path, encoding="utf-8-sig", low_memory=False)
             # row_type == 'SUMMARY' のみ残す
             if "row_type" in _dataframe.columns:
                 _dataframe = _dataframe[_dataframe["row_type"] == "SUMMARY"]
             _data_source = f"CSV ({path.name})"
-            log(f"[DATA] Loaded {len(_dataframe):,} rows from CSV (optimized)")
+            log(f"[DATA] Loaded {len(_dataframe):,} rows from CSV")
             return _dataframe
 
     _data_source = "no data source"
@@ -373,28 +383,37 @@ _gap_dataframe: pd.DataFrame | None = None
 def load_gap_data() -> pd.DataFrame:
     """Load GAP row_type data from Turso for supply/demand balance analysis.
 
-    メモリ最適化: 必要なカラムのみをロード
+    全カラム取得: バックグラウンド事前ロードと連携し、2GB RAMを活用
     """
     global _gap_dataframe
     if _gap_dataframe is not None:
         return _gap_dataframe
 
-    # メモリ最適化: 需給バランス分析に必要なカラムのみ取得
-    GAP_COLUMNS = "prefecture, municipality, row_type, demand_count, supply_count, gap, demand_supply_ratio"
+    # 事前ロードキャッシュをチェック（バックグラウンドロード完了時）
+    if _DB_HELPER_AVAILABLE:
+        try:
+            preloaded = get_preloaded_data(row_type='GAP')
+            if not preloaded.empty:
+                _gap_dataframe = preloaded
+                log(f"[DATA] Using preload cache for GAP: {len(_gap_dataframe):,} rows")
+                # Ensure numeric columns
+                for col in ["demand_count", "supply_count", "gap", "demand_supply_ratio"]:
+                    if col in _gap_dataframe.columns:
+                        _gap_dataframe[col] = pd.to_numeric(_gap_dataframe[col], errors="coerce")
+                return _gap_dataframe
+        except Exception as e:
+            log(f"[DATA] GAP preload cache check failed: {e}")
 
     if TURSO_DATABASE_URL and TURSO_AUTH_TOKEN:
         try:
-            log("[DATA] Loading GAP data from Turso (optimized columns)...")
-            _gap_dataframe = query_turso(f"SELECT {GAP_COLUMNS} FROM job_seeker_data WHERE row_type = 'GAP'")
+            log("[DATA] Loading GAP data from Turso (all columns)...")
+            # 全カラム取得（2GB RAMがあるので問題なし）
+            _gap_dataframe = query_turso("SELECT * FROM job_seeker_data WHERE row_type = 'GAP'")
             log(f"[DATA] Loaded {len(_gap_dataframe):,} GAP rows from Turso")
             # Ensure numeric columns
             for col in ["demand_count", "supply_count", "gap", "demand_supply_ratio"]:
                 if col in _gap_dataframe.columns:
                     _gap_dataframe[col] = pd.to_numeric(_gap_dataframe[col], errors="coerce")
-            # メモリ最適化: カテゴリ型に変換
-            for col in ["prefecture", "municipality", "row_type"]:
-                if col in _gap_dataframe.columns:
-                    _gap_dataframe[col] = _gap_dataframe[col].astype("category")
             return _gap_dataframe
         except Exception as exc:
             log(f"[DATA] GAP data load failed: {exc}")
@@ -3088,6 +3107,12 @@ if __name__ in {"__main__", "__mp_main__"}:
 
     print(f"[STARTUP] Starting NiceGUI app on port {port}...")
     print(f"[STARTUP] Production mode: {is_production}")
+
+    # バックグラウンドで全データを事前ロード開始（タイムアウト回避）
+    # ユーザーは待たずに操作開始可能、バックグラウンドで全カラムがキャッシュされる
+    if _DB_HELPER_AVAILABLE:
+        print("[STARTUP] Starting background data preload...")
+        start_background_preload()
 
     ui.run(
         title="job_ap_analyzer_gui",

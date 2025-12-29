@@ -1086,12 +1086,12 @@ def execute_custom_query(sql: str, params: Optional[tuple] = None) -> pd.DataFra
 # =============================================================================
 
 def _batch_stats_query(prefecture: str = None, municipality: str = None) -> dict:
-    """統計取得用バッチクエリ（1回のHTTP通信で全row_type取得）
+    """統計取得用バッチクエリ（事前ロードキャッシュ優先 + フォールバックでDB）
 
-    従来: row_typeごとに3-4回クエリ
-    改善後: 1回のクエリで全row_type取得 → Python内でフィルタ
-
-    メモリ最適化: 必要なカラムのみ取得（Render 512MB対応）
+    優先順位:
+    1. 事前ロードキャッシュ（_preload_cache）から取得（DBアクセスなし）
+    2. 静的キャッシュ（_static_cache）から取得
+    3. フォールバック: DBクエリ実行
 
     Args:
         prefecture: 都道府県名（Noneで全国）
@@ -1112,22 +1112,43 @@ def _batch_stats_query(prefecture: str = None, municipality: str = None) -> dict
     # キャッシュキー生成
     cache_key = f"batch_stats_{prefecture or 'ALL'}_{municipality or 'ALL'}"
 
-    # 永続キャッシュから取得
+    # 1. 静的キャッシュから取得（既に計算済みの場合）
     if cache_key in _static_cache:
-        # キャッシュヒットログは抑制（ノイズ削減）
         return _static_cache[cache_key]
+
+    # 2. 事前ロードキャッシュから取得（全カラム、DBアクセス不要）
+    # 注: _preload_cacheは後方で定義されるが、実行時には存在する
+    try:
+        if '_preload_cache' in globals() and _preload_cache:
+            if prefecture and prefecture in _preload_cache:
+                # 特定都道府県のデータを事前ロードキャッシュから取得
+                df_all = _preload_cache[prefecture].copy()
+                if municipality and 'municipality' in df_all.columns:
+                    df_all = df_all[df_all['municipality'] == municipality]
+
+                # row_typeでフィルタ
+                row_types = ['SUMMARY', 'RESIDENCE_FLOW', 'AGE_GENDER']
+                if 'row_type' in df_all.columns:
+                    df_all = df_all[df_all['row_type'].isin(row_types)]
+
+                if not df_all.empty:
+                    result = {
+                        "SUMMARY": df_all[df_all["row_type"] == "SUMMARY"].copy(),
+                        "RESIDENCE_FLOW": df_all[df_all["row_type"] == "RESIDENCE_FLOW"].copy(),
+                        "AGE_GENDER": df_all[df_all["row_type"] == "AGE_GENDER"].copy()
+                    }
+                    # 静的キャッシュにも保存（次回高速化）
+                    _static_cache[cache_key] = result
+                    print(f"[DB] Batch stats from preload cache: {cache_key}")
+                    return result
+    except Exception as e:
+        print(f"[DEBUG] Preload cache check failed: {e}")
 
     print(f"[DB] Batch stats query for {prefecture or 'ALL'}/{municipality or 'ALL'}...")
 
     try:
-        # メモリ最適化: 必要なカラムのみ取得（SELECT * を避ける）
-        # SUMMARY用: avg_desired_areas, avg_qualifications, male_count, female_count
-        # RESIDENCE_FLOW用: avg_reference_distance_km
-        # AGE_GENDER用: category1, age_group, count
-        BATCH_COLUMNS = """row_type, prefecture, municipality,
-            avg_desired_areas, avg_qualifications, male_count, female_count,
-            avg_reference_distance_km, category1, age_group, count, applicant_count"""
-
+        # 3. フォールバック: DBから全カラム取得（事前ロード未完了時）
+        # 注: 全カラム取得に変更（SELECT *）- メモリは2GBあるので問題なし
         conditions = ["row_type IN ('SUMMARY', 'RESIDENCE_FLOW', 'AGE_GENDER')"]
         params = []
 
@@ -1140,9 +1161,9 @@ def _batch_stats_query(prefecture: str = None, municipality: str = None) -> dict
 
         where_clause = " AND ".join(conditions)
 
-        # 1回のHTTP通信で必要なカラムのみ取得（メモリ最適化）
+        # 全カラム取得（SELECT *）- 2GBメモリでは問題なし
         df_all = query_df(
-            f"SELECT {BATCH_COLUMNS} FROM job_seeker_data WHERE {where_clause}",
+            f"SELECT * FROM job_seeker_data WHERE {where_clause}",
             tuple(params) if params else None
         )
 
@@ -3719,6 +3740,149 @@ def get_workstyle_mobility_summary(prefecture: str = None, municipality: str = N
         import traceback
         traceback.print_exc()
         return {"by_workstyle": [], "by_mobility": [], "heatmap": []}
+
+
+# =====================================
+# バックグラウンド全データ事前ロード（タイムアウト回避 + 全カラムキャッシュ）
+# =====================================
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# 事前ロードキャッシュ（都道府県別の全データ）
+_preload_cache: dict = {}
+_preload_status = {
+    "loading": False,
+    "loaded": False,
+    "progress": 0,
+    "total": len(PREFECTURE_ORDER),
+    "errors": []
+}
+
+def _preload_prefecture_data(pref: str) -> pd.DataFrame:
+    """都道府県単位でデータを取得（タイムアウト回避用、全カラム）
+
+    Args:
+        pref: 都道府県名
+
+    Returns:
+        DataFrame（その都道府県の全データ）
+    """
+    if not _HAS_TURSO:
+        return pd.DataFrame()
+
+    try:
+        # 全カラムを取得（SELECT *）- 1都道府県ずつなのでタイムアウトしにくい
+        sql = f"SELECT * FROM job_seeker_data WHERE prefecture = ?"
+        return query_df(sql, (pref,))
+    except Exception as e:
+        print(f"[PRELOAD] Failed to load {pref}: {e}")
+        return pd.DataFrame()
+
+
+def _background_preload_all():
+    """バックグラウンドで全データを都道府県ごとに取得（タイムアウト回避）
+
+    戦略:
+    - 47都道府県を1つずつ順番に取得
+    - 各クエリは1都道府県分のみなので軽量（タイムアウト回避）
+    - 取得したデータは都道府県ごとにキャッシュ
+    - 全取得完了後、他の関数はキャッシュから参照可能
+    """
+    global _preload_cache, _preload_status
+
+    if _preload_status["loading"] or _preload_status["loaded"]:
+        return
+
+    _preload_status["loading"] = True
+    _preload_status["progress"] = 0
+    _preload_status["errors"] = []
+
+    print("[PRELOAD] Starting background data load (all columns, prefecture by prefecture)...")
+
+    # 都道府県ごとに順次取得（並列だとサーバー負荷が高いので順次）
+    for i, pref in enumerate(PREFECTURE_ORDER):
+        try:
+            df = _preload_prefecture_data(pref)
+            if not df.empty:
+                _preload_cache[pref] = df
+                print(f"[PRELOAD] Loaded {pref}: {len(df):,} rows")
+            else:
+                print(f"[PRELOAD] No data for {pref}")
+        except Exception as e:
+            error_msg = f"{pref}: {e}"
+            _preload_status["errors"].append(error_msg)
+            print(f"[PRELOAD] Error: {error_msg}")
+
+        _preload_status["progress"] = i + 1
+
+    _preload_status["loading"] = False
+    _preload_status["loaded"] = True
+
+    total_rows = sum(len(df) for df in _preload_cache.values())
+    print(f"[PRELOAD] Background load complete: {len(_preload_cache)} prefectures, {total_rows:,} total rows")
+
+
+def start_background_preload():
+    """バックグラウンド事前ロードを開始（非ブロッキング）
+
+    アプリ起動時に呼び出すと、バックグラウンドで全データをロード開始。
+    ユーザーは待たずに操作開始可能。
+    """
+    if _preload_status["loading"] or _preload_status["loaded"]:
+        print("[PRELOAD] Already loading or loaded, skipping")
+        return
+
+    thread = threading.Thread(target=_background_preload_all, daemon=True)
+    thread.start()
+    print("[PRELOAD] Background preload thread started")
+
+
+def get_preload_status() -> dict:
+    """事前ロードの状態を取得
+
+    Returns:
+        dict: {
+            "loading": bool,  # ロード中かどうか
+            "loaded": bool,   # ロード完了かどうか
+            "progress": int,  # 完了した都道府県数
+            "total": int,     # 総都道府県数
+            "errors": list    # エラーリスト
+        }
+    """
+    return _preload_status.copy()
+
+
+def get_preloaded_data(prefecture: str = None, row_type: str = None) -> pd.DataFrame:
+    """事前ロードされたデータを取得
+
+    Args:
+        prefecture: 都道府県名（Noneで全国）
+        row_type: 行タイプフィルタ（None, 'SUMMARY', 'RESIDENCE_FLOW'等）
+
+    Returns:
+        DataFrame（条件に合致するデータ）
+    """
+    if not _preload_cache:
+        return pd.DataFrame()
+
+    if prefecture:
+        df = _preload_cache.get(prefecture, pd.DataFrame())
+    else:
+        # 全都道府県を結合
+        dfs = list(_preload_cache.values())
+        if not dfs:
+            return pd.DataFrame()
+        df = pd.concat(dfs, ignore_index=True)
+
+    if row_type and not df.empty and 'row_type' in df.columns:
+        df = df[df['row_type'] == row_type]
+
+    return df
+
+
+def is_preload_ready() -> bool:
+    """事前ロードが完了しているかどうか"""
+    return _preload_status["loaded"]
 
 
 if __name__ == "__main__":
