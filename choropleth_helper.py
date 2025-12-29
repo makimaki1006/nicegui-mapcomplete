@@ -154,10 +154,10 @@ PREF_CENTERS = {
     "沖縄県": (26.2124, 127.6809),
 }
 
-# GeoJSONキャッシュ（LRU方式、最大10都道府県）
+# GeoJSONキャッシュ（LRU方式、最大3都道府県 - Render 512MB対応）
 _geojson_cache: Dict[str, dict] = {}
 _cache_order: List[str] = []  # LRU順序追跡
-_CACHE_MAX_SIZE = 10  # メモリ節約のため最大10都道府県
+_CACHE_MAX_SIZE = 3  # Renderメモリ制限対応（512MB）
 
 
 def get_geojson_path(prefecture: str) -> Optional[Path]:

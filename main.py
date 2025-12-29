@@ -370,6 +370,10 @@ def load_gap_data() -> pd.DataFrame:
             for col in ["demand_count", "supply_count", "gap", "demand_supply_ratio"]:
                 if col in _gap_dataframe.columns:
                     _gap_dataframe[col] = pd.to_numeric(_gap_dataframe[col], errors="coerce")
+            # メモリ最適化: カテゴリ型に変換
+            for col in ["prefecture", "municipality", "row_type"]:
+                if col in _gap_dataframe.columns:
+                    _gap_dataframe[col] = _gap_dataframe[col].astype("category")
             return _gap_dataframe
         except Exception as exc:
             log(f"[DATA] GAP data load failed: {exc}")
@@ -492,6 +496,15 @@ def _clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     for col in numeric_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # メモリ最適化: 文字列カラムをカテゴリ型に変換（Render 512MB対応）
+    category_cols = [
+        "prefecture", "municipality", "row_type", "gender", "age_group",
+        "employment_status", "workstyle", "qualification", "desired_area_type",
+    ]
+    for col in category_cols:
+        if col in df.columns:
+            df[col] = df[col].astype("category")
 
     log(f"[DATA] Cleaned dataframe rows: {len(df):,}")
     return df.reset_index(drop=True)
