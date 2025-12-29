@@ -320,7 +320,10 @@ def query_turso(sql: str) -> pd.DataFrame:
 def load_data() -> pd.DataFrame:
     """Load data from Turso first, then fallback to CSV; cache the result.
 
-    全カラム取得: バックグラウンド事前ロードと連携し、2GB RAMを活用
+    戦略:
+    - 初回ロード: 最小カラム（タイムアウト回避）
+    - バックグラウンド: 全カラムをロード（db_helper側で実行）
+    - 詳細データ: db_helperの各関数がバックグラウンドキャッシュを使用
     """
     global _dataframe, _data_source
     print("[DATA] load_data() called", flush=True)
@@ -340,14 +343,16 @@ def load_data() -> pd.DataFrame:
         except Exception as e:
             print(f"[DATA] Preload cache check failed: {e}", flush=True)
 
+    # 初回ロード: 最小カラム（タイムアウト回避）
+    ESSENTIAL_COLUMNS = "prefecture, municipality, row_type"
+
     print(f"[DATA] TURSO_DATABASE_URL: {bool(TURSO_DATABASE_URL)}, TURSO_AUTH_TOKEN: {bool(TURSO_AUTH_TOKEN)}", flush=True)
     if TURSO_DATABASE_URL and TURSO_AUTH_TOKEN:
         try:
-            print("[DATA] Attempting Turso load (all columns)...", flush=True)
-            log("[DATA] Loading from Turso (SUMMARY only, all columns)...")
-            # 全カラム取得（2GB RAMがあるので問題なし）
-            _dataframe = query_turso("SELECT * FROM job_seeker_data WHERE row_type = 'SUMMARY'")
-            _data_source = "Turso DB"
+            print("[DATA] Attempting Turso load (essential columns)...", flush=True)
+            log("[DATA] Loading from Turso (SUMMARY only, essential columns)...")
+            _dataframe = query_turso(f"SELECT {ESSENTIAL_COLUMNS} FROM job_seeker_data WHERE row_type = 'SUMMARY'")
+            _data_source = "Turso DB (lightweight)"
             print(f"[DATA] Turso SUCCESS: {len(_dataframe):,} rows", flush=True)
             log(f"[DATA] Loaded {len(_dataframe):,} rows from Turso")
             return _dataframe
@@ -356,14 +361,17 @@ def load_data() -> pd.DataFrame:
             log(f"[DATA] Turso failed: {type(exc).__name__}: {exc}")
             log("[DATA] Falling back to CSV...")
 
-    # CSVフォールバック: 全カラム読み込み
+    # CSVフォールバック: 最小カラム読み込み
+    essential_cols_list = ["prefecture", "municipality", "row_type"]
     for path in [CSV_PATH_GZ, CSV_PATH, CSV_PATH_ALT]:
         if path.exists():
-            log(f"[DATA] Loading from CSV: {path} (all columns)")
+            log(f"[DATA] Loading from CSV: {path} (essential columns)")
             if path.suffix == ".gz":
-                _dataframe = pd.read_csv(path, encoding="utf-8-sig", compression="gzip", low_memory=False)
+                _dataframe = pd.read_csv(path, encoding="utf-8-sig", compression="gzip",
+                                         usecols=lambda c: c in essential_cols_list, low_memory=True)
             else:
-                _dataframe = pd.read_csv(path, encoding="utf-8-sig", low_memory=False)
+                _dataframe = pd.read_csv(path, encoding="utf-8-sig",
+                                         usecols=lambda c: c in essential_cols_list, low_memory=True)
             # row_type == 'SUMMARY' のみ残す
             if "row_type" in _dataframe.columns:
                 _dataframe = _dataframe[_dataframe["row_type"] == "SUMMARY"]
@@ -383,7 +391,9 @@ _gap_dataframe: pd.DataFrame | None = None
 def load_gap_data() -> pd.DataFrame:
     """Load GAP row_type data from Turso for supply/demand balance analysis.
 
-    全カラム取得: バックグラウンド事前ロードと連携し、2GB RAMを活用
+    戦略:
+    - 初回ロード: 必要カラムのみ（タイムアウト回避）
+    - バックグラウンド: 全カラムをロード（db_helper側で実行）
     """
     global _gap_dataframe
     if _gap_dataframe is not None:
@@ -404,11 +414,13 @@ def load_gap_data() -> pd.DataFrame:
         except Exception as e:
             log(f"[DATA] GAP preload cache check failed: {e}")
 
+    # 初回ロード: 需給バランス分析に必要なカラムのみ取得
+    GAP_COLUMNS = "prefecture, municipality, row_type, demand_count, supply_count, gap, demand_supply_ratio"
+
     if TURSO_DATABASE_URL and TURSO_AUTH_TOKEN:
         try:
-            log("[DATA] Loading GAP data from Turso (all columns)...")
-            # 全カラム取得（2GB RAMがあるので問題なし）
-            _gap_dataframe = query_turso("SELECT * FROM job_seeker_data WHERE row_type = 'GAP'")
+            log("[DATA] Loading GAP data from Turso (essential columns)...")
+            _gap_dataframe = query_turso(f"SELECT {GAP_COLUMNS} FROM job_seeker_data WHERE row_type = 'GAP'")
             log(f"[DATA] Loaded {len(_gap_dataframe):,} GAP rows from Turso")
             # Ensure numeric columns
             for col in ["demand_count", "supply_count", "gap", "demand_supply_ratio"]:

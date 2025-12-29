@@ -1147,8 +1147,12 @@ def _batch_stats_query(prefecture: str = None, municipality: str = None) -> dict
     print(f"[DB] Batch stats query for {prefecture or 'ALL'}/{municipality or 'ALL'}...")
 
     try:
-        # 3. フォールバック: DBから全カラム取得（事前ロード未完了時）
-        # 注: 全カラム取得に変更（SELECT *）- メモリは2GBあるので問題なし
+        # 3. フォールバック: DBから必要カラムのみ取得（タイムアウト回避）
+        # 詳細データはバックグラウンドプリロード完了後に利用可能
+        BATCH_COLUMNS = """row_type, prefecture, municipality,
+            avg_desired_areas, avg_qualifications, male_count, female_count,
+            avg_reference_distance_km, category1, age_group, count, applicant_count"""
+
         conditions = ["row_type IN ('SUMMARY', 'RESIDENCE_FLOW', 'AGE_GENDER')"]
         params = []
 
@@ -1161,9 +1165,9 @@ def _batch_stats_query(prefecture: str = None, municipality: str = None) -> dict
 
         where_clause = " AND ".join(conditions)
 
-        # 全カラム取得（SELECT *）- 2GBメモリでは問題なし
+        # 必要カラムのみ取得（タイムアウト回避）
         df_all = query_df(
-            f"SELECT * FROM job_seeker_data WHERE {where_clause}",
+            f"SELECT {BATCH_COLUMNS} FROM job_seeker_data WHERE {where_clause}",
             tuple(params) if params else None
         )
 
