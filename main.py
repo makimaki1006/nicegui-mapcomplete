@@ -64,6 +64,9 @@ try:
         get_preload_status,
         get_preloaded_data,
         is_preload_ready,
+        # 職種切り替え関数
+        set_current_job_type,
+        get_current_job_type,
     )
     _DB_HELPER_AVAILABLE = True
     print("[STARTUP] db_helper.py loaded successfully")
@@ -94,6 +97,8 @@ except ImportError as e:
     get_urgency_gender_data = lambda pref=None, muni=None: []
     get_urgency_start_category_data = lambda pref=None, muni=None: []
     DB_PREFECTURE_ORDER = []
+    set_current_job_type = lambda job_type: None
+    get_current_job_type = lambda: "介護職"
 
 # コロプレスマップヘルパー（47都道府県GeoJSON対応）
 try:
@@ -788,6 +793,16 @@ def dashboard_page() -> None:
 
     state = app.storage.user
     state.setdefault("tab", "overview")
+    state.setdefault("job_type", "介護職")  # 職種セレクター用（将来拡張予定）
+
+    # 利用可能な職種リスト（Tursoに登録済みの5職種）
+    JOB_TYPE_OPTIONS = [
+        "介護職",
+        "看護師",
+        "保育士",
+        "栄養士",
+        "生活相談員",
+    ]
 
     # Header
     with ui.header().style(f"background-color: {BG_COLOR}; border-bottom: 1px solid {BORDER_COLOR}"):
@@ -963,7 +978,51 @@ def dashboard_page() -> None:
             show_content.refresh()
 
     with ui.row().classes("w-full p-4 items-end gap-4").style(f"background-color: {PANEL_BG}"):
-        # ドロップダウンを目立つカードで囲む
+        # === 職種セレクター（将来の複数職種対応用） ===
+        with ui.card().classes("p-3").style(
+            "background-color: #2d3a4a; "  # やや薄いグレー背景
+            "border: 2px solid #E69F00; "  # オレンジのボーダー（Okabe-Ito）
+            "border-radius: 12px; "
+            "box-shadow: 0 0 10px rgba(230, 159, 0, 0.3);"  # グロー効果
+        ):
+            with ui.row().classes("gap-4 items-center"):
+                ui.icon("work", size="md").style("color: #E69F00;")
+                ui.label("職種").classes("text-lg font-bold").style("color: #E69F00;")
+
+            async def on_job_type_change(e):
+                """職種変更時のハンドラ - db_helperの職種を切り替えてデータ再読み込み"""
+                new_job_type = _get_event_value(e, job_type_select)
+                if new_job_type is not None and new_job_type != state.get("job_type"):
+                    state["job_type"] = new_job_type
+                    log(f"[UI] job_type change -> {new_job_type}")
+                    # db_helperの職種を切り替え（キャッシュクリア含む）
+                    set_current_job_type(new_job_type)
+                    ui.notify(f"職種を「{new_job_type}」に切り替えました", type="positive")
+                    # データ再読み込み
+                    show_content.refresh()
+
+            with ui.row().classes("gap-4 mt-2"):
+                # セッションストレージの値を検証（エンコーディング問題対策）
+                stored_job_type = state.get("job_type", "介護職")
+                valid_job_type = stored_job_type if stored_job_type in JOB_TYPE_OPTIONS else "介護職"
+                if stored_job_type != valid_job_type:
+                    state["job_type"] = valid_job_type  # 無効な値を修正
+                    log(f"[UI] Invalid job_type '{stored_job_type}' -> reset to '{valid_job_type}'")
+
+                job_type_select = ui.select(
+                    options=JOB_TYPE_OPTIONS,
+                    value=valid_job_type,
+                    label="職種を選択",
+                    on_change=on_job_type_change,
+                ).classes("w-40").props(
+                    'filled dense dark '
+                    'bg-color="brown-9" '
+                    'label-color="orange" '
+                    'color="white" '
+                    'popup-content-class="bg-grey-9 text-white"'
+                ).style("min-width: 140px;")
+
+        # === 地域セレクター ===
         with ui.card().classes("p-3").style(
             "background-color: #1a3a5c; "  # 青みがかった濃い背景
             "border: 2px solid #00BFFF; "  # 明るいシアンのボーダー
