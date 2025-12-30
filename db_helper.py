@@ -275,6 +275,41 @@ _static_cache: dict = {
 }
 _cache_initialized: bool = False
 
+# 現在選択中の職種（グローバル設定）
+_current_job_type: str = "介護職"
+
+
+def set_current_job_type(job_type: str) -> None:
+    """現在の職種を設定し、キャッシュをクリアする
+
+    職種変更時に呼び出すこと。キャッシュは自動的にクリアされ、
+    次回クエリ時に新しい職種でデータが取得される。
+    """
+    global _current_job_type, _static_cache, _cache, _cache_time
+
+    if _current_job_type == job_type:
+        print(f"[JOB_TYPE] Already set to: {job_type}")
+        return
+
+    print(f"[JOB_TYPE] Changing from '{_current_job_type}' to '{job_type}'")
+    _current_job_type = job_type
+
+    # キャッシュをクリア（新職種のデータを取得するため）
+    _static_cache = {
+        "prefectures": None,
+        "municipalities": {},
+        "filtered_data": {},
+    }
+    _cache = {}
+    _cache_time = {}
+    print(f"[JOB_TYPE] Cache cleared for job_type change")
+
+
+def get_current_job_type() -> str:
+    """現在選択中の職種を取得"""
+    return _current_job_type
+
+
 # 都道府県の標準順序（JISコード順：北から南）
 PREFECTURE_ORDER = [
     "北海道",
@@ -746,14 +781,18 @@ def get_table(table_name: str) -> pd.DataFrame:
 
 
 def get_all_data() -> pd.DataFrame:
-    """Turso job_seeker_data テーブルから全データを取得（キャッシュ対応）"""
-    cache_key = "ALL_DATA"
+    """Turso job_seeker_data テーブルから現在のjob_typeの全データを取得（キャッシュ対応）"""
+    job_type = _current_job_type
+    cache_key = f"ALL_DATA_{job_type}"
     cached = _get_cached(cache_key)
     if cached is not None:
         return cached
 
     if _HAS_TURSO:
-        df = query_df("SELECT * FROM job_seeker_data")
+        df = query_df(
+            "SELECT * FROM job_seeker_data WHERE job_type = ?",
+            (job_type,)
+        )
     else:
         df = query_df("SELECT * FROM mapcomplete_raw")
 
@@ -794,13 +833,17 @@ def get_prefectures() -> list:
     elif _HAS_TURSO:
         # Tursoモード: リトライ付きでDBクエリ、失敗時CSVフォールバック
         max_retries = 3
+        job_type = _current_job_type
         for attempt in range(max_retries):
             try:
-                df = query_df("SELECT DISTINCT prefecture FROM job_seeker_data")
+                df = query_df(
+                    "SELECT DISTINCT prefecture FROM job_seeker_data WHERE job_type = ?",
+                    (job_type,)
+                )
                 if not df.empty:
                     prefectures = df['prefecture'].tolist()
                     result = _sort_prefectures(prefectures)
-                    print(f"[TURSO] Loaded {len(result)} prefectures (attempt {attempt + 1})")
+                    print(f"[TURSO] Loaded {len(result)} prefectures for {job_type} (attempt {attempt + 1})")
                     break
             except Exception as e:
                 print(f"[TURSO] Attempt {attempt + 1}/{max_retries} failed: {e}")
@@ -877,15 +920,16 @@ def get_municipalities(prefecture: str) -> list:
     elif _HAS_TURSO:
         # Tursoモード: リトライ付きクエリ、失敗時CSVフォールバック
         max_retries = 2
+        job_type = _current_job_type
         for attempt in range(max_retries):
             try:
                 df = query_df(
-                    "SELECT DISTINCT municipality FROM job_seeker_data WHERE prefecture = ? AND municipality IS NOT NULL ORDER BY municipality",
-                    (prefecture,)
+                    "SELECT DISTINCT municipality FROM job_seeker_data WHERE prefecture = ? AND job_type = ? AND municipality IS NOT NULL ORDER BY municipality",
+                    (prefecture, job_type)
                 )
                 if not df.empty:
                     result = df['municipality'].tolist()
-                    print(f"[TURSO] Loaded {len(result)} municipalities for {prefecture} (attempt {attempt + 1})")
+                    print(f"[TURSO] Loaded {len(result)} municipalities for {prefecture}/{job_type} (attempt {attempt + 1})")
                     break
                 else:
                     result = []
@@ -940,13 +984,14 @@ def get_municipalities(prefecture: str) -> list:
 def query_municipality(prefecture: str, municipality: str = None) -> pd.DataFrame:
     """市区町村単位でデータを取得（永続キャッシュ対応、Turso専用）
 
-    最適化: prefecture+municipality単位で永続キャッシュ。
+    最適化: prefecture+municipality+job_type単位で永続キャッシュ。
     同じ地域へのアクセスは全ユーザーでキャッシュ共有（TTLなし）。
     データ更新時は refresh_all_cache() を呼び出してキャッシュをクリア。
     """
     global _static_cache
 
-    cache_key = f"{prefecture}_{municipality or 'ALL'}"
+    job_type = _current_job_type
+    cache_key = f"{job_type}_{prefecture}_{municipality or 'ALL'}"
 
     # 永続キャッシュから取得
     if cache_key in _static_cache.get("filtered_data", {}):
@@ -954,14 +999,14 @@ def query_municipality(prefecture: str, municipality: str = None) -> pd.DataFram
         # キャッシュヒットログは抑制（ノイズ削減）
         return cached
 
-    print(f"[DB] Fetching data for {prefecture}/{municipality or 'ALL'} (first time only)...")
+    print(f"[DB] Fetching data for {job_type}/{prefecture}/{municipality or 'ALL'} (first time only)...")
 
     if municipality:
-        sql = "SELECT * FROM job_seeker_data WHERE prefecture = ? AND municipality = ?"
-        df = query_df(sql, (prefecture, municipality))
+        sql = "SELECT * FROM job_seeker_data WHERE job_type = ? AND prefecture = ? AND municipality = ?"
+        df = query_df(sql, (job_type, prefecture, municipality))
     else:
-        sql = "SELECT * FROM job_seeker_data WHERE prefecture = ?"
-        df = query_df(sql, (prefecture,))
+        sql = "SELECT * FROM job_seeker_data WHERE job_type = ? AND prefecture = ?"
+        df = query_df(sql, (job_type, prefecture))
 
     # 永続キャッシュに保存
     if "filtered_data" not in _static_cache:
@@ -987,8 +1032,9 @@ def get_filtered_data(prefecture: str, municipality: str = None) -> pd.DataFrame
     """
     global _static_cache
 
-    # 永続キャッシュキーを生成
-    cache_key = f"{prefecture}_{municipality or 'ALL'}"
+    job_type = _current_job_type
+    # 永続キャッシュキーを生成（job_type含む）
+    cache_key = f"{job_type}_{prefecture}_{municipality or 'ALL'}"
 
     # 永続キャッシュから取得
     if cache_key in _static_cache.get("filtered_data", {}):
@@ -997,8 +1043,11 @@ def get_filtered_data(prefecture: str, municipality: str = None) -> pd.DataFrame
         return cached
 
     if USE_CSV_MODE:
-        print(f"[CSV] Filtering data for {prefecture}/{municipality or 'ALL'}...")
+        print(f"[CSV] Filtering data for {job_type}/{prefecture}/{municipality or 'ALL'}...")
         df = _load_csv_data()
+        # job_typeフィルタ（CSVにjob_type列がある場合）
+        if 'job_type' in df.columns:
+            df = df[df['job_type'] == job_type]
         if prefecture:
             df = df[df['prefecture'] == prefecture]
         if municipality:
@@ -1030,13 +1079,14 @@ def get_filtered_data(prefecture: str, municipality: str = None) -> pd.DataFrame
 
 def get_row_count_by_location(prefecture: str, municipality: str = None) -> int:
     """指定地域のデータ行数を取得（軽量クエリ）"""
+    job_type = _current_job_type
     if _HAS_TURSO:
         if municipality:
-            sql = "SELECT COUNT(*) as cnt FROM job_seeker_data WHERE prefecture = ? AND municipality = ?"
-            df = query_df(sql, (prefecture, municipality))
+            sql = "SELECT COUNT(*) as cnt FROM job_seeker_data WHERE job_type = ? AND prefecture = ? AND municipality = ?"
+            df = query_df(sql, (job_type, prefecture, municipality))
         else:
-            sql = "SELECT COUNT(*) as cnt FROM job_seeker_data WHERE prefecture = ?"
-            df = query_df(sql, (prefecture,))
+            sql = "SELECT COUNT(*) as cnt FROM job_seeker_data WHERE job_type = ? AND prefecture = ?"
+            df = query_df(sql, (job_type, prefecture))
     else:
         sql = "SELECT COUNT(*) as cnt FROM mapcomplete_raw WHERE 1=1"
         params = []
@@ -1185,8 +1235,9 @@ def _batch_stats_query(prefecture: str = None, municipality: str = None) -> dict
         print("[DEBUG] _HAS_TURSO is False, returning empty dict", flush=True)
         return {}
 
-    # キャッシュキー生成
-    cache_key = f"batch_stats_{prefecture or 'ALL'}_{municipality or 'ALL'}"
+    # キャッシュキー生成（job_type含む）
+    job_type = _current_job_type
+    cache_key = f"batch_stats_{job_type}_{prefecture or 'ALL'}_{municipality or 'ALL'}"
 
     # 1. 静的キャッシュから取得（既に計算済みの場合）
     if cache_key in _static_cache:
@@ -1232,8 +1283,9 @@ def _batch_stats_query(prefecture: str = None, municipality: str = None) -> dict
             avg_reference_distance_km, category1, count, applicant_count,
             desired_prefecture, desired_municipality"""
 
-        conditions = ["row_type IN ('SUMMARY', 'RESIDENCE_FLOW', 'AGE_GENDER')"]
-        params = []
+        # job_typeフィルタを常に含める
+        conditions = ["job_type = ?", "row_type IN ('SUMMARY', 'RESIDENCE_FLOW', 'AGE_GENDER')"]
+        params = [job_type]
 
         if prefecture:
             conditions.append("prefecture = ?")
@@ -1247,7 +1299,7 @@ def _batch_stats_query(prefecture: str = None, municipality: str = None) -> dict
         # 必要カラムのみ取得（タイムアウト回避）
         df_all = query_df(
             f"SELECT {BATCH_COLUMNS} FROM job_seeker_data WHERE {where_clause}",
-            tuple(params) if params else None
+            tuple(params)
         )
 
         if df_all.empty:
@@ -1289,15 +1341,16 @@ def _batch_flow_query(municipality: str) -> dict:
     if not _HAS_TURSO or not municipality:
         return {"sources": [], "destinations": []}
 
-    # キャッシュキー生成
-    cache_key = f"batch_flow_{municipality}"
+    # キャッシュキー生成（job_type含む）
+    job_type = _current_job_type
+    cache_key = f"batch_flow_{job_type}_{municipality}"
 
     # 永続キャッシュから取得
     if cache_key in _static_cache:
         # キャッシュヒットログは抑制（ノイズ削減）
         return _static_cache[cache_key]
 
-    print(f"[DB] Batch flow query for {municipality}...")
+    print(f"[DB] Batch flow query for {municipality} (job_type={job_type})...")
 
     try:
         # 1回のHTTP通信で関連データを全取得
@@ -1306,10 +1359,10 @@ def _batch_flow_query(municipality: str) -> dict:
         sql = """
             SELECT municipality, co_desired_municipality, count
             FROM job_seeker_data
-            WHERE row_type = 'DESIRED_AREA_PATTERN'
+            WHERE job_type = ? AND row_type = 'DESIRED_AREA_PATTERN'
             AND (municipality = ? OR co_desired_municipality = ?)
         """
-        df_all = query_df(sql, (municipality, municipality))
+        df_all = query_df(sql, (job_type, municipality, municipality))
 
         sources = []
         destinations = []
@@ -1370,20 +1423,22 @@ def _batch_persona_query(prefecture: str = None, municipality: str = None) -> di
     if not _HAS_TURSO:
         return {}
 
-    # キャッシュキー生成
-    cache_key = f"batch_persona_{prefecture or 'ALL'}_{municipality or 'ALL'}"
+    # キャッシュキー生成（job_type含む）
+    job_type = _current_job_type
+    cache_key = f"batch_persona_{job_type}_{prefecture or 'ALL'}_{municipality or 'ALL'}"
 
     # 永続キャッシュから取得
     if cache_key in _static_cache:
         # キャッシュヒットログは抑制（ノイズ削減）
         return _static_cache[cache_key]
 
-    print(f"[DB] Batch persona query for {prefecture or 'ALL'}/{municipality or 'ALL'}...")
+    print(f"[DB] Batch persona query for {prefecture or 'ALL'}/{municipality or 'ALL'} (job_type={job_type})...")
 
     try:
         # 必要なrow_typeを1回のクエリで全取得（QUALIFICATION_PERSONA追加）
-        conditions = ["row_type IN ('AGE_GENDER_RESIDENCE', 'QUALIFICATION_DETAIL', 'QUALIFICATION_PERSONA')"]
-        params = []
+        # job_typeフィルタを常に含める
+        conditions = ["job_type = ?", "row_type IN ('AGE_GENDER_RESIDENCE', 'QUALIFICATION_DETAIL', 'QUALIFICATION_PERSONA')"]
+        params = [job_type]
 
         if prefecture:
             conditions.append("prefecture = ?")
@@ -1397,7 +1452,7 @@ def _batch_persona_query(prefecture: str = None, municipality: str = None) -> di
         # 1回のHTTP通信で全データ取得
         df_all = query_df(
             f"SELECT * FROM job_seeker_data WHERE {where_clause}",
-            tuple(params) if params else None
+            tuple(params)
         )
 
         if df_all.empty:
@@ -1467,8 +1522,12 @@ def get_national_stats() -> dict:
         if df_summary.empty:
             print("[DEBUG] Batch query returned empty SUMMARY, trying fallback query...", flush=True)
             try:
-                df_summary = query_df("SELECT prefecture, municipality, avg_desired_areas, avg_qualifications, male_count, female_count FROM job_seeker_data WHERE row_type = 'SUMMARY'")
-                print(f"[DEBUG] Fallback SUMMARY query: {len(df_summary)} rows", flush=True)
+                job_type = _current_job_type
+                df_summary = query_df(
+                    "SELECT prefecture, municipality, avg_desired_areas, avg_qualifications, male_count, female_count FROM job_seeker_data WHERE job_type = ? AND row_type = 'SUMMARY'",
+                    (job_type,)
+                )
+                print(f"[DEBUG] Fallback SUMMARY query for {job_type}: {len(df_summary)} rows", flush=True)
             except Exception as fallback_err:
                 print(f"[ERROR] Fallback SUMMARY query failed: {fallback_err}", flush=True)
 
@@ -1494,8 +1553,12 @@ def get_national_stats() -> dict:
         # フォールバック: RESIDENCE_FLOWも空の場合、個別クエリ（メモリ最適化）
         if df_flow.empty:
             try:
-                df_flow = query_df("SELECT prefecture, municipality, avg_reference_distance_km FROM job_seeker_data WHERE row_type = 'RESIDENCE_FLOW' LIMIT 5000")
-                print(f"[DEBUG] Fallback RESIDENCE_FLOW query: {len(df_flow)} rows", flush=True)
+                job_type = _current_job_type
+                df_flow = query_df(
+                    "SELECT prefecture, municipality, avg_reference_distance_km FROM job_seeker_data WHERE job_type = ? AND row_type = 'RESIDENCE_FLOW' LIMIT 5000",
+                    (job_type,)
+                )
+                print(f"[DEBUG] Fallback RESIDENCE_FLOW query for {job_type}: {len(df_flow)} rows", flush=True)
             except Exception as flow_err:
                 print(f"[DEBUG] Fallback RESIDENCE_FLOW query failed: {flow_err}", flush=True)
 
@@ -1510,8 +1573,12 @@ def get_national_stats() -> dict:
         if df_age.empty:
             try:
                 # age_groupはデータベースに存在しないため削除（2025-12-29 修正）
-                df_age = query_df("SELECT prefecture, municipality, category1, count, applicant_count FROM job_seeker_data WHERE row_type = 'AGE_GENDER'")
-                print(f"[DEBUG] Fallback AGE_GENDER query: {len(df_age)} rows", flush=True)
+                job_type = _current_job_type
+                df_age = query_df(
+                    "SELECT prefecture, municipality, category1, count, applicant_count FROM job_seeker_data WHERE job_type = ? AND row_type = 'AGE_GENDER'",
+                    (job_type,)
+                )
+                print(f"[DEBUG] Fallback AGE_GENDER query for {job_type}: {len(df_age)} rows", flush=True)
             except Exception as age_err:
                 print(f"[DEBUG] Fallback AGE_GENDER query failed: {age_err}", flush=True)
 
@@ -2734,13 +2801,14 @@ def get_workstyle_distribution(prefecture: str = None, municipality: str = None)
     """
     print(f"[DB] get_workstyle_distribution called: pref={prefecture}, muni={municipality}")
     try:
+        job_type = _current_job_type
         if USE_CSV_MODE:
             df = _load_csv_data()
             filtered = df[df['row_type'] == 'WORKSTYLE_DISTRIBUTION']
         else:
-            # SQLレベルでフィルタリング（効率化）
-            conditions = ["row_type = 'WORKSTYLE_DISTRIBUTION'"]
-            params = []
+            # SQLレベルでフィルタリング（効率化）- job_type含む
+            conditions = ["job_type = ?", "row_type = 'WORKSTYLE_DISTRIBUTION'"]
+            params = [job_type]
             if prefecture:
                 conditions.append("prefecture = ?")
                 params.append(prefecture)
@@ -2748,7 +2816,7 @@ def get_workstyle_distribution(prefecture: str = None, municipality: str = None)
                 conditions.append("municipality = ?")
                 params.append(municipality)
             sql = f"SELECT * FROM job_seeker_data WHERE {' AND '.join(conditions)}"
-            filtered = query_df(sql, tuple(params) if params else None)
+            filtered = query_df(sql, tuple(params))
 
         print(f"[DB] get_workstyle_distribution: {len(filtered)} rows after query")
         if not filtered.empty:
@@ -2789,6 +2857,7 @@ def get_workstyle_age_cross(prefecture: str = None, municipality: str = None) ->
     """
     print(f"[DB] get_workstyle_age_cross called: pref={prefecture}, muni={municipality}")
     try:
+        job_type = _current_job_type
         if USE_CSV_MODE:
             df = _load_csv_data()
             filtered = df[df['row_type'] == 'WORKSTYLE_AGE_CROSS']
@@ -2797,9 +2866,9 @@ def get_workstyle_age_cross(prefecture: str = None, municipality: str = None) ->
             if municipality:
                 filtered = filtered[filtered['municipality'] == municipality]
         else:
-            # SQLレベルでフィルタリング
-            conditions = ["row_type = 'WORKSTYLE_AGE_CROSS'"]
-            params = []
+            # SQLレベルでフィルタリング - job_type含む
+            conditions = ["job_type = ?", "row_type = 'WORKSTYLE_AGE_CROSS'"]
+            params = [job_type]
             if prefecture:
                 conditions.append("prefecture = ?")
                 params.append(prefecture)
@@ -2807,7 +2876,7 @@ def get_workstyle_age_cross(prefecture: str = None, municipality: str = None) ->
                 conditions.append("municipality = ?")
                 params.append(municipality)
             sql = f"SELECT * FROM job_seeker_data WHERE {' AND '.join(conditions)}"
-            filtered = query_df(sql, tuple(params) if params else None)
+            filtered = query_df(sql, tuple(params))
 
         print(f"[DB] get_workstyle_age_cross: {len(filtered)} rows")
         if filtered.empty:
@@ -2842,6 +2911,7 @@ def get_workstyle_gender_cross(prefecture: str = None, municipality: str = None)
     """
     print(f"[DB] get_workstyle_gender_cross called: pref={prefecture}, muni={municipality}")
     try:
+        job_type = _current_job_type
         if USE_CSV_MODE:
             df = _load_csv_data()
             filtered = df[df['row_type'] == 'WORKSTYLE_GENDER_CROSS']
@@ -2850,9 +2920,9 @@ def get_workstyle_gender_cross(prefecture: str = None, municipality: str = None)
             if municipality:
                 filtered = filtered[filtered['municipality'] == municipality]
         else:
-            # SQLレベルでフィルタリング
-            conditions = ["row_type = 'WORKSTYLE_GENDER_CROSS'"]
-            params = []
+            # SQLレベルでフィルタリング - job_type含む
+            conditions = ["job_type = ?", "row_type = 'WORKSTYLE_GENDER_CROSS'"]
+            params = [job_type]
             if prefecture:
                 conditions.append("prefecture = ?")
                 params.append(prefecture)
@@ -2860,7 +2930,7 @@ def get_workstyle_gender_cross(prefecture: str = None, municipality: str = None)
                 conditions.append("municipality = ?")
                 params.append(municipality)
             sql = f"SELECT * FROM job_seeker_data WHERE {' AND '.join(conditions)}"
-            filtered = query_df(sql, tuple(params) if params else None)
+            filtered = query_df(sql, tuple(params))
 
         print(f"[DB] get_workstyle_gender_cross: {len(filtered)} rows")
         if filtered.empty:
@@ -2895,6 +2965,7 @@ def get_workstyle_urgency_cross(prefecture: str = None, municipality: str = None
     """
     print(f"[DB] get_workstyle_urgency_cross called: pref={prefecture}, muni={municipality}")
     try:
+        job_type = _current_job_type
         if USE_CSV_MODE:
             df = _load_csv_data()
             filtered = df[df['row_type'] == 'WORKSTYLE_URGENCY']
@@ -2903,9 +2974,9 @@ def get_workstyle_urgency_cross(prefecture: str = None, municipality: str = None
             if municipality:
                 filtered = filtered[filtered['municipality'] == municipality]
         else:
-            # SQLレベルでフィルタリング
-            conditions = ["row_type = 'WORKSTYLE_URGENCY'"]
-            params = []
+            # SQLレベルでフィルタリング - job_type含む
+            conditions = ["job_type = ?", "row_type = 'WORKSTYLE_URGENCY'"]
+            params = [job_type]
             if prefecture:
                 conditions.append("prefecture = ?")
                 params.append(prefecture)
@@ -2913,7 +2984,7 @@ def get_workstyle_urgency_cross(prefecture: str = None, municipality: str = None
                 conditions.append("municipality = ?")
                 params.append(municipality)
             sql = f"SELECT * FROM job_seeker_data WHERE {' AND '.join(conditions)}"
-            filtered = query_df(sql, tuple(params) if params else None)
+            filtered = query_df(sql, tuple(params))
 
         print(f"[DB] get_workstyle_urgency_cross: {len(filtered)} rows")
         if filtered.empty:
@@ -2948,6 +3019,7 @@ def get_workstyle_employment_cross(prefecture: str = None, municipality: str = N
     """
     print(f"[DB] get_workstyle_employment_cross called: pref={prefecture}, muni={municipality}")
     try:
+        job_type = _current_job_type
         if USE_CSV_MODE:
             df = _load_csv_data()
             filtered = df[df['row_type'] == 'WORKSTYLE_EMPLOYMENT_STATUS']
@@ -2956,9 +3028,9 @@ def get_workstyle_employment_cross(prefecture: str = None, municipality: str = N
             if municipality:
                 filtered = filtered[filtered['municipality'] == municipality]
         else:
-            # SQLレベルでフィルタリング
-            conditions = ["row_type = 'WORKSTYLE_EMPLOYMENT_STATUS'"]
-            params = []
+            # SQLレベルでフィルタリング - job_type含む
+            conditions = ["job_type = ?", "row_type = 'WORKSTYLE_EMPLOYMENT_STATUS'"]
+            params = [job_type]
             if prefecture:
                 conditions.append("prefecture = ?")
                 params.append(prefecture)
@@ -2966,7 +3038,7 @@ def get_workstyle_employment_cross(prefecture: str = None, municipality: str = N
                 conditions.append("municipality = ?")
                 params.append(municipality)
             sql = f"SELECT * FROM job_seeker_data WHERE {' AND '.join(conditions)}"
-            filtered = query_df(sql, tuple(params) if params else None)
+            filtered = query_df(sql, tuple(params))
 
         print(f"[DB] get_workstyle_employment_cross: {len(filtered)} rows")
         if filtered.empty:
@@ -3001,6 +3073,7 @@ def get_workstyle_area_count_cross(prefecture: str = None, municipality: str = N
     """
     print(f"[DB] get_workstyle_area_count_cross called: pref={prefecture}, muni={municipality}")
     try:
+        job_type = _current_job_type
         if USE_CSV_MODE:
             df = _load_csv_data()
             filtered = df[df['row_type'] == 'WORKSTYLE_DESIRED_AREA_COUNT']
@@ -3009,9 +3082,9 @@ def get_workstyle_area_count_cross(prefecture: str = None, municipality: str = N
             if municipality:
                 filtered = filtered[filtered['municipality'] == municipality]
         else:
-            # SQLレベルでフィルタリング
-            conditions = ["row_type = 'WORKSTYLE_DESIRED_AREA_COUNT'"]
-            params = []
+            # SQLレベルでフィルタリング - job_type含む
+            conditions = ["job_type = ?", "row_type = 'WORKSTYLE_DESIRED_AREA_COUNT'"]
+            params = [job_type]
             if prefecture:
                 conditions.append("prefecture = ?")
                 params.append(prefecture)
@@ -3019,7 +3092,7 @@ def get_workstyle_area_count_cross(prefecture: str = None, municipality: str = N
                 conditions.append("municipality = ?")
                 params.append(municipality)
             sql = f"SELECT * FROM job_seeker_data WHERE {' AND '.join(conditions)}"
-            filtered = query_df(sql, tuple(params) if params else None)
+            filtered = query_df(sql, tuple(params))
 
         print(f"[DB] get_workstyle_area_count_cross: {len(filtered)} rows")
         if filtered.empty:
@@ -3086,14 +3159,15 @@ def get_urgency_gender_data(prefecture: str = None, municipality: str = None) ->
     """
     try:
         print(f"[DB] get_urgency_gender_data called: pref={prefecture}, muni={municipality}")
+        job_type = _current_job_type
         if USE_CSV_MODE:
             df = _load_csv_data()
             print(f"[DB] CSV loaded: {len(df)} rows, row_types: {df['row_type'].unique()[:10].tolist() if 'row_type' in df.columns else 'no row_type column'}")
             filtered = df[df['row_type'] == 'URGENCY_GENDER']
             print(f"[DB] URGENCY_GENDER filtered: {len(filtered)} rows")
         else:
-            sql = "SELECT * FROM job_seeker_data WHERE row_type = 'URGENCY_GENDER'"
-            filtered = query_df(sql)
+            sql = "SELECT * FROM job_seeker_data WHERE job_type = ? AND row_type = 'URGENCY_GENDER'"
+            filtered = query_df(sql, (job_type,))
 
         if filtered.empty:
             print(f"[DB] URGENCY_GENDER: No data after row_type filter")
@@ -3151,12 +3225,13 @@ def get_urgency_start_category_data(prefecture: str = None, municipality: str = 
         list: [{"category": "今すぐ", "count": 500, "avg_score": 5.0}, ...]
     """
     try:
+        job_type = _current_job_type
         if USE_CSV_MODE:
             df = _load_csv_data()
             filtered = df[df['row_type'] == 'URGENCY_START_CATEGORY']
         else:
-            sql = "SELECT * FROM job_seeker_data WHERE row_type = 'URGENCY_START_CATEGORY'"
-            filtered = query_df(sql)
+            sql = "SELECT * FROM job_seeker_data WHERE job_type = ? AND row_type = 'URGENCY_START_CATEGORY'"
+            filtered = query_df(sql, (job_type,))
 
         if filtered.empty:
             return []
@@ -3209,12 +3284,13 @@ def get_workstyle_mobility_data(prefecture: str = None, municipality: str = None
     """
     try:
         print(f"[DB] get_workstyle_mobility_data called: pref={prefecture}, muni={municipality}")
+        job_type = _current_job_type
         if USE_CSV_MODE:
             df = _load_csv_data()
             filtered = df[df['row_type'] == 'WORKSTYLE_MOBILITY']
         else:
-            sql = "SELECT * FROM job_seeker_data WHERE row_type = 'WORKSTYLE_MOBILITY'"
-            filtered = query_df(sql)
+            sql = "SELECT * FROM job_seeker_data WHERE job_type = ? AND row_type = 'WORKSTYLE_MOBILITY'"
+            filtered = query_df(sql, (job_type,))
 
         if filtered.empty:
             print(f"[DB] WORKSTYLE_MOBILITY: No data")
@@ -3272,8 +3348,9 @@ def get_map_markers(prefecture: str = None) -> list:
     global _static_cache
 
     try:
-        # キャッシュキー生成
-        cache_key = f"map_markers_{prefecture or 'ALL'}"
+        # キャッシュキー生成（job_type含む）
+        job_type = _current_job_type
+        cache_key = f"map_markers_{job_type}_{prefecture or 'ALL'}"
 
         # キャッシュヒット
         if cache_key in _static_cache:
@@ -3281,13 +3358,13 @@ def get_map_markers(prefecture: str = None) -> list:
             print(f"[DB] get_map_markers cache HIT: {len(cached)} markers")
             return cached
 
-        print(f"[DB] get_map_markers called: pref={prefecture}")
+        print(f"[DB] get_map_markers called: pref={prefecture} job_type={job_type}")
         if USE_CSV_MODE:
             df = _load_csv_data()
             filtered = df[df['row_type'] == 'SUMMARY']
         else:
-            sql = "SELECT * FROM job_seeker_data WHERE row_type = 'SUMMARY'"
-            filtered = query_df(sql)
+            sql = "SELECT * FROM job_seeker_data WHERE job_type = ? AND row_type = 'SUMMARY'"
+            filtered = query_df(sql, (job_type,))
 
         if filtered.empty:
             print(f"[DB] get_map_markers: No SUMMARY data")
@@ -3356,8 +3433,9 @@ def get_flow_lines(prefecture: str = None) -> list:
     global _static_cache
 
     try:
-        # キャッシュキー生成
-        cache_key = f"flow_lines_{prefecture or 'ALL'}"
+        # キャッシュキー生成（job_type含む）
+        job_type = _current_job_type
+        cache_key = f"flow_lines_{job_type}_{prefecture or 'ALL'}"
 
         # キャッシュヒット
         if cache_key in _static_cache:
@@ -3365,13 +3443,13 @@ def get_flow_lines(prefecture: str = None) -> list:
             print(f"[DB] get_flow_lines cache HIT: {len(cached)} flows")
             return cached
 
-        print(f"[DB] get_flow_lines called: pref={prefecture}")
+        print(f"[DB] get_flow_lines called: pref={prefecture} job_type={job_type}")
         if USE_CSV_MODE:
             df = _load_csv_data()
             filtered = df[df['row_type'] == 'RESIDENCE_FLOW']
         else:
-            sql = "SELECT * FROM job_seeker_data WHERE row_type = 'RESIDENCE_FLOW'"
-            filtered = query_df(sql)
+            sql = "SELECT * FROM job_seeker_data WHERE job_type = ? AND row_type = 'RESIDENCE_FLOW'"
+            filtered = query_df(sql, (job_type,))
 
         if filtered.empty:
             return []
@@ -3387,11 +3465,14 @@ def get_flow_lines(prefecture: str = None) -> list:
         if filtered.empty:
             return []
 
-        # 都道府県の座標マップ（SUMMARYから取得）
+        # 都道府県の座標マップ（SUMMARYから取得）- job_typeフィルタ含む
         if USE_CSV_MODE:
             summary_df = df[df['row_type'] == 'SUMMARY']
         else:
-            summary_df = query_df("SELECT * FROM job_seeker_data WHERE row_type = 'SUMMARY'")
+            summary_df = query_df(
+                "SELECT * FROM job_seeker_data WHERE job_type = ? AND row_type = 'SUMMARY'",
+                (job_type,)
+            )
 
         pref_coords = {}
         for _, row in summary_df.iterrows():
@@ -3464,12 +3545,16 @@ def get_inflow_sources(
     """
     try:
         print(f"[DB] get_inflow_sources: target={target_prefecture}/{target_municipality}, filters={workstyle}/{age_group}/{gender}")
+        job_type = _current_job_type
 
         if USE_CSV_MODE:
             df = _load_csv_data()
             filtered = df[df['row_type'] == 'RESIDENCE_FLOW']
         else:
-            filtered = query_df("SELECT * FROM job_seeker_data WHERE row_type = 'RESIDENCE_FLOW'")
+            filtered = query_df(
+                "SELECT * FROM job_seeker_data WHERE job_type = ? AND row_type = 'RESIDENCE_FLOW'",
+                (job_type,)
+            )
 
         if filtered.empty:
             print("[DB] get_inflow_sources: No RESIDENCE_FLOW data")
@@ -3517,7 +3602,10 @@ def get_inflow_sources(
             summary_df = _load_csv_data()
             summary_df = summary_df[summary_df['row_type'] == 'SUMMARY']
         else:
-            summary_df = query_df("SELECT prefecture, municipality, latitude, longitude FROM job_seeker_data WHERE row_type = 'SUMMARY'")
+            summary_df = query_df(
+                "SELECT prefecture, municipality, latitude, longitude FROM job_seeker_data WHERE job_type = ? AND row_type = 'SUMMARY'",
+                (job_type,)
+            )
 
         # 座標マップを作成
         coord_map = {}
@@ -3588,12 +3676,16 @@ def get_flow_balance(
     """
     try:
         print(f"[DB] get_flow_balance: pref={prefecture}, filters={workstyle}/{age_group}/{gender}")
+        job_type = _current_job_type
 
         if USE_CSV_MODE:
             df = _load_csv_data()
             flow_df = df[df['row_type'] == 'RESIDENCE_FLOW']
         else:
-            flow_df = query_df("SELECT * FROM job_seeker_data WHERE row_type = 'RESIDENCE_FLOW'")
+            flow_df = query_df(
+                "SELECT * FROM job_seeker_data WHERE job_type = ? AND row_type = 'RESIDENCE_FLOW'",
+                (job_type,)
+            )
 
         if flow_df.empty:
             return []
@@ -3638,7 +3730,10 @@ def get_flow_balance(
         if USE_CSV_MODE:
             summary_df = df[df['row_type'].isin(['SUMMARY', 'MUNICIPALITY'])]
         else:
-            summary_df = query_df("SELECT * FROM job_seeker_data WHERE row_type IN ('SUMMARY', 'MUNICIPALITY')")
+            summary_df = query_df(
+                "SELECT * FROM job_seeker_data WHERE job_type = ? AND row_type IN ('SUMMARY', 'MUNICIPALITY')",
+                (job_type,)
+            )
 
         coords = {}
         for _, row in summary_df.iterrows():
@@ -3732,12 +3827,16 @@ def get_competing_areas(
     """
     try:
         print(f"[DB] get_competing_areas: source={source_prefecture}/{source_municipality}, filters={workstyle}/{age_group}/{gender}")
+        job_type = _current_job_type
 
         if USE_CSV_MODE:
             df = _load_csv_data()
             filtered = df[df['row_type'] == 'RESIDENCE_FLOW']
         else:
-            filtered = query_df("SELECT * FROM job_seeker_data WHERE row_type = 'RESIDENCE_FLOW'")
+            filtered = query_df(
+                "SELECT * FROM job_seeker_data WHERE job_type = ? AND row_type = 'RESIDENCE_FLOW'",
+                (job_type,)
+            )
 
         if filtered.empty:
             return []
@@ -3781,7 +3880,10 @@ def get_competing_areas(
             summary_df = _load_csv_data()
             summary_df = summary_df[summary_df['row_type'] == 'SUMMARY']
         else:
-            summary_df = query_df("SELECT prefecture, municipality, latitude, longitude FROM job_seeker_data WHERE row_type = 'SUMMARY'")
+            summary_df = query_df(
+                "SELECT prefecture, municipality, latitude, longitude FROM job_seeker_data WHERE job_type = ? AND row_type = 'SUMMARY'",
+                (job_type,)
+            )
 
         coords = {}
         for _, row in summary_df.iterrows():
@@ -3926,7 +4028,7 @@ _preload_status = {
 }
 
 def _preload_prefecture_data(pref: str) -> pd.DataFrame:
-    """都道府県単位でデータを取得（タイムアウト回避用、全カラム）
+    """都道府県単位でデータを取得（タイムアウト回避用、全カラム、job_typeフィルタ含む）
 
     Args:
         pref: 都道府県名
@@ -3939,8 +4041,10 @@ def _preload_prefecture_data(pref: str) -> pd.DataFrame:
 
     try:
         # 全カラムを取得（SELECT *）- 1都道府県ずつなのでタイムアウトしにくい
-        sql = f"SELECT * FROM job_seeker_data WHERE prefecture = ?"
-        return query_df(sql, (pref,))
+        # job_typeフィルタを追加
+        job_type = _current_job_type
+        sql = f"SELECT * FROM job_seeker_data WHERE job_type = ? AND prefecture = ?"
+        return query_df(sql, (job_type, pref))
     except Exception as e:
         print(f"[PRELOAD] Failed to load {pref}: {e}")
         return pd.DataFrame()
