@@ -1250,6 +1250,11 @@ def _batch_stats_query(prefecture: str = None, municipality: str = None) -> dict
             if prefecture and prefecture in _preload_cache:
                 # 特定都道府県のデータを事前ロードキャッシュから取得
                 df_all = _preload_cache[prefecture].copy()
+
+                # job_typeでフィルタ（必須）
+                if 'job_type' in df_all.columns:
+                    df_all = df_all[df_all['job_type'] == job_type]
+
                 if municipality and 'municipality' in df_all.columns:
                     df_all = df_all[df_all['municipality'] == municipality]
 
@@ -1692,7 +1697,9 @@ def get_all_prefectures_stats() -> dict:
     """
     global _static_cache
 
-    cache_key = "all_prefecture_stats"
+    # キャッシュキーにjob_typeを含める（職種切り替え対応）
+    job_type = _current_job_type
+    cache_key = f"all_prefecture_stats_{job_type}"
     if cache_key in _static_cache:
         # キャッシュヒットログは抑制（ノイズ削減）
         return _static_cache[cache_key]
@@ -1930,9 +1937,11 @@ def get_rarity_analysis(prefecture: str = None, municipality: str = None,
         return []
 
     try:
+        # job_typeを取得（職種切り替え対応）
+        job_type = _current_job_type
         # QUALIFICATION_PERSONA または RARITYを使用
-        conditions = ["row_type IN ('QUALIFICATION_PERSONA', 'RARITY')"]
-        params = []
+        conditions = ["job_type = ?", "row_type IN ('QUALIFICATION_PERSONA', 'RARITY')"]
+        params = [job_type]
 
         if prefecture:
             conditions.append("prefecture = ?")
@@ -2093,8 +2102,10 @@ def get_persona_employment_breakdown(prefecture: str = None, municipality: str =
         return []
 
     try:
-        conditions = ["row_type = 'PERSONA_MUNI'"]
-        params = []
+        # job_typeを取得（職種切り替え対応）
+        job_type = _current_job_type
+        conditions = ["job_type = ?", "row_type = 'PERSONA_MUNI'"]
+        params = [job_type]
 
         if prefecture:
             conditions.append("prefecture = ?")
@@ -2213,8 +2224,10 @@ def get_distance_stats(prefecture: str = None, municipality: str = None) -> dict
         return {"mean": "-", "min": "-", "max": "-", "q25": "-", "median": "-", "q75": "-", "unit": "km"}
 
     try:
-        conditions = ["row_type = 'RESIDENCE_FLOW'", "avg_reference_distance_km IS NOT NULL"]
-        params = []
+        # job_typeを取得（職種切り替え対応）
+        job_type = _current_job_type
+        conditions = ["job_type = ?", "row_type = 'RESIDENCE_FLOW'", "avg_reference_distance_km IS NOT NULL"]
+        params = [job_type]
 
         if prefecture:
             conditions.append("prefecture = ?")
@@ -2305,8 +2318,10 @@ def get_mobility_type_distribution(prefecture: str = None, municipality: str = N
         return []
 
     try:
-        conditions = ["row_type = 'RESIDENCE_FLOW'", "mobility_type IS NOT NULL"]
-        params = []
+        # job_typeを取得（職種切り替え対応）
+        job_type = _current_job_type
+        conditions = ["job_type = ?", "row_type = 'RESIDENCE_FLOW'", "mobility_type IS NOT NULL"]
+        params = [job_type]
 
         # モードによってフィルタ対象列を変更
         if mode == "residence":
@@ -2378,8 +2393,10 @@ def get_competition_overview(prefecture: str = None, municipality: str = None) -
         return {}
 
     try:
-        conditions = ["row_type = 'COMPETITION'"]
-        params = []
+        # job_typeを取得（職種切り替え対応）
+        job_type = _current_job_type
+        conditions = ["job_type = ?", "row_type = 'COMPETITION'"]
+        params = [job_type]
 
         if prefecture:
             conditions.append("prefecture = ?")
@@ -2401,14 +2418,14 @@ def get_competition_overview(prefecture: str = None, municipality: str = None) -
 
         # 市区町村指定時にデータがない場合は、都道府県レベルにフォールバック
         if df.empty and municipality and prefecture:
-            conditions_pref = ["row_type = 'COMPETITION'", "prefecture = ?"]
+            conditions_pref = ["job_type = ?", "row_type = 'COMPETITION'", "prefecture = ?"]
             df = query_df(
                 f"""SELECT total_applicants, female_ratio, male_ratio, category1,
                            top_age_ratio, category2, top_employment_ratio, avg_qualification_count
                    FROM job_seeker_data
                    WHERE {' AND '.join(conditions_pref)}
                    LIMIT 1""",
-                (prefecture,)
+                (job_type, prefecture)
             )
 
         if df.empty:
@@ -2464,8 +2481,10 @@ def get_talent_flow(prefecture: str = None, municipality: str = None) -> dict:
         return {}
 
     try:
-        conditions = ["row_type = 'FLOW'"]
-        params = []
+        # job_typeを取得（職種切り替え対応）
+        job_type = _current_job_type
+        conditions = ["job_type = ?", "row_type = 'FLOW'"]
+        params = [job_type]
 
         if prefecture:
             conditions.append("prefecture = ?")
@@ -4131,10 +4150,13 @@ def get_preloaded_data(prefecture: str = None, row_type: str = None) -> pd.DataF
         row_type: 行タイプフィルタ（None, 'SUMMARY', 'RESIDENCE_FLOW'等）
 
     Returns:
-        DataFrame（条件に合致するデータ）
+        DataFrame（条件に合致するデータ、現在のjob_typeでフィルタ済み）
     """
     if not _preload_cache:
         return pd.DataFrame()
+
+    # 現在のjob_typeを取得（職種切り替え対応）
+    job_type = _current_job_type
 
     if prefecture:
         df = _preload_cache.get(prefecture, pd.DataFrame())
@@ -4144,6 +4166,10 @@ def get_preloaded_data(prefecture: str = None, row_type: str = None) -> pd.DataF
         if not dfs:
             return pd.DataFrame()
         df = pd.concat(dfs, ignore_index=True)
+
+    # job_typeでフィルタ（必須）
+    if not df.empty and 'job_type' in df.columns:
+        df = df[df['job_type'] == job_type]
 
     if row_type and not df.empty and 'row_type' in df.columns:
         df = df[df['row_type'] == row_type]
@@ -4185,11 +4211,15 @@ def get_municipality_detail(prefecture: str, municipality: str) -> dict:
         start_time = time.time()
         result = {}
 
-        # 3つのクエリを定義
+        # job_typeを取得（職種切り替え対応）
+        job_type = _current_job_type
+
+        # 3つのクエリを定義（すべてにjob_typeフィルタを追加）
         age_gender_sql = """
             SELECT category1 as age_group, category2 as gender, SUM(count) as total
             FROM job_seeker_data
-            WHERE row_type = 'AGE_GENDER'
+            WHERE job_type = ?
+              AND row_type = 'AGE_GENDER'
               AND prefecture = ?
               AND municipality = ?
               AND category1 IS NOT NULL
@@ -4200,7 +4230,8 @@ def get_municipality_detail(prefecture: str, municipality: str) -> dict:
         ws_sql = """
             SELECT category1 as workstyle, SUM(count) as total
             FROM job_seeker_data
-            WHERE row_type = 'WORKSTYLE_DISTRIBUTION'
+            WHERE job_type = ?
+              AND row_type = 'WORKSTYLE_DISTRIBUTION'
               AND prefecture = ?
               AND municipality = ?
               AND category1 IS NOT NULL
@@ -4210,7 +4241,8 @@ def get_municipality_detail(prefecture: str, municipality: str) -> dict:
         summary_sql = """
             SELECT male_count, female_count, avg_age, avg_qualifications
             FROM job_seeker_data
-            WHERE row_type = 'SUMMARY'
+            WHERE job_type = ?
+              AND row_type = 'SUMMARY'
               AND prefecture = ?
               AND municipality = ?
             LIMIT 1
@@ -4220,19 +4252,19 @@ def get_municipality_detail(prefecture: str, municipality: str) -> dict:
         db_type = get_db_type()
         if db_type == "turso":
             queries = [
-                (age_gender_sql, (prefecture, municipality)),
-                (ws_sql, (prefecture, municipality)),
-                (summary_sql, (prefecture, municipality)),
+                (age_gender_sql, (job_type, prefecture, municipality)),
+                (ws_sql, (job_type, prefecture, municipality)),
+                (summary_sql, (job_type, prefecture, municipality)),
             ]
             dfs = _turso_batch_query(queries)
             age_gender_df = dfs[0] if len(dfs) > 0 else pd.DataFrame()
             ws_df = dfs[1] if len(dfs) > 1 else pd.DataFrame()
             summary_df = dfs[2] if len(dfs) > 2 else pd.DataFrame()
         else:
-            # SQLite/PostgreSQL用（従来通り個別クエリ）
-            age_gender_df = query_df(age_gender_sql, (prefecture, municipality))
-            ws_df = query_df(ws_sql, (prefecture, municipality))
-            summary_df = query_df(summary_sql, (prefecture, municipality))
+            # SQLite/PostgreSQL用（従来通り個別クエリ、job_typeフィルタ付き）
+            age_gender_df = query_df(age_gender_sql, (job_type, prefecture, municipality))
+            ws_df = query_df(ws_sql, (job_type, prefecture, municipality))
+            summary_df = query_df(summary_sql, (job_type, prefecture, municipality))
 
         # 年齢×性別データの処理
         if not age_gender_df.empty:

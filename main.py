@@ -1009,6 +1009,12 @@ def dashboard_page() -> None:
                     state["job_type"] = valid_job_type  # 無効な値を修正
                     log(f"[UI] Invalid job_type '{stored_job_type}' -> reset to '{valid_job_type}'")
 
+                # ページロード時にdb_helperの職種をセッションと同期（重要！）
+                current_db_job_type = get_current_job_type()
+                if current_db_job_type != valid_job_type:
+                    set_current_job_type(valid_job_type)
+                    log(f"[UI] Sync db_helper job_type: '{current_db_job_type}' -> '{valid_job_type}'")
+
                 job_type_select = ui.select(
                     options=JOB_TYPE_OPTIONS,
                     value=valid_job_type,
