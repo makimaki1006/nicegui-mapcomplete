@@ -824,9 +824,13 @@ def get_prefectures() -> list:
         # CSVモード: 直接CSV読み込み
         try:
             df = _load_csv_data()
+            job_type = _current_job_type
+            # 2025-12-31 修正: CSVモードでもjob_typeフィルタを追加
+            if 'job_type' in df.columns:
+                df = df[df['job_type'] == job_type]
             prefectures = df['prefecture'].dropna().unique().tolist()
             result = _sort_prefectures(prefectures)
-            print(f"[CSV] Loaded {len(result)} prefectures from CSV")
+            print(f"[CSV] Loaded {len(result)} prefectures for {job_type} from CSV")
         except Exception as e:
             print(f"[ERROR] CSV load failed: {e}")
             result = []
@@ -910,10 +914,15 @@ def get_municipalities(prefecture: str) -> list:
         # CSVモード: 直接CSV読み込み
         try:
             df = _load_csv_data()
-            filtered = df[df['prefecture'] == prefecture]
+            job_type = _current_job_type
+            # 2025-12-31 修正: CSVモードでもjob_typeフィルタを追加
+            if 'job_type' in df.columns:
+                filtered = df[(df['prefecture'] == prefecture) & (df['job_type'] == job_type)]
+            else:
+                filtered = df[df['prefecture'] == prefecture]
             municipalities = filtered['municipality'].dropna().unique().tolist()
             result = sorted(municipalities)
-            print(f"[CSV] Loaded {len(result)} municipalities for {prefecture}")
+            print(f"[CSV] Loaded {len(result)} municipalities for {prefecture}/{job_type}")
         except Exception as e:
             print(f"[ERROR] CSV load failed: {e}")
             result = []
@@ -1283,9 +1292,10 @@ def _batch_stats_query(prefecture: str = None, municipality: str = None) -> dict
         # 詳細データはバックグラウンドプリロード完了後に利用可能
         # age_groupはデータベースに存在しないため削除（2025-12-29 修正）
         # RESIDENCE_FLOW用にdesired_prefecture/desired_municipality追加（2025-12-29 修正）
+        # category2追加（2025-12-31 修正：age_gender_pyramid用）
         BATCH_COLUMNS = """row_type, prefecture, municipality,
             avg_desired_areas, avg_qualifications, male_count, female_count,
-            avg_reference_distance_km, category1, count, applicant_count,
+            avg_reference_distance_km, category1, category2, count, applicant_count,
             desired_prefecture, desired_municipality"""
 
         # job_typeフィルタを常に含める
@@ -1510,7 +1520,8 @@ def get_national_stats() -> dict:
         "qualifications": 0.0,
         "male_count": 0,
         "female_count": 0,
-        "age_distribution": {}
+        "age_distribution": {},
+        "age_gender_pyramid": {}  # 年齢×性別の実データ（推定ではなく事実）
     }
 
     try:
@@ -1578,9 +1589,10 @@ def get_national_stats() -> dict:
         if df_age.empty:
             try:
                 # age_groupはデータベースに存在しないため削除（2025-12-29 修正）
+                # category2（性別）を追加（2025-12-31 修正：age_gender_pyramid用）
                 job_type = _current_job_type
                 df_age = query_df(
-                    "SELECT prefecture, municipality, category1, count, applicant_count FROM job_seeker_data WHERE job_type = ? AND row_type = 'AGE_GENDER'",
+                    "SELECT prefecture, municipality, category1, category2, count, applicant_count FROM job_seeker_data WHERE job_type = ? AND row_type = 'AGE_GENDER'",
                     (job_type,)
                 )
                 print(f"[DEBUG] Fallback AGE_GENDER query for {job_type}: {len(df_age)} rows", flush=True)
@@ -1602,6 +1614,23 @@ def get_national_stats() -> dict:
                         normalized_dist[k] = int(v)
                 result["age_distribution"] = normalized_dist
                 print(f"[DEBUG] age_distribution: {result['age_distribution']}", flush=True)
+
+                # 年齢×性別ピラミッド（実データ、推定ではない）（2025-12-31 追加）
+                if 'category2' in df_age.columns:
+                    age_gender_pyramid = {}
+                    for _, row in df_age.iterrows():
+                        age_group = row.get('category1', '')
+                        gender = row.get('category2', '')
+                        cnt = int(row.get('count', 0) or 0)
+                        if age_group and gender and cnt > 0:
+                            if age_group not in age_gender_pyramid:
+                                age_gender_pyramid[age_group] = {'male': 0, 'female': 0}
+                            if '男' in str(gender):
+                                age_gender_pyramid[age_group]['male'] += cnt
+                            elif '女' in str(gender):
+                                age_gender_pyramid[age_group]['female'] += cnt
+                    result["age_gender_pyramid"] = age_gender_pyramid
+                    print(f"[DEBUG] age_gender_pyramid: {result['age_gender_pyramid']}", flush=True)
             else:
                 # category1がない場合、別のカラムを探す
                 print(f"[DEBUG] AGE_GENDER missing category1 or count column, trying alternatives...", flush=True)
@@ -1668,8 +1697,9 @@ def get_prefecture_stats(prefecture: str) -> dict:
             if len(valid_distances) > 0:
                 result["distance_km"] = round(float(valid_distances.mean()), 2)
 
-        # AGE_GENDERから年齢層別分布を計算
+        # AGE_GENDERから年齢層別分布と年齢×性別ピラミッドを計算
         df_age = batch_data.get("AGE_GENDER", pd.DataFrame())
+        age_gender_pyramid = {}
         if not df_age.empty and 'category1' in df_age.columns and 'count' in df_age.columns:
             # count列を数値に変換（文字列で格納されている場合の対策）
             df_age['count'] = pd.to_numeric(df_age['count'], errors='coerce').fillna(0)
@@ -1680,8 +1710,23 @@ def get_prefecture_stats(prefecture: str) -> dict:
                 if k in normalized_dist:
                     normalized_dist[k] = int(v)
             result["age_distribution"] = normalized_dist
+            # 年齢×性別ピラミッド（実データ）
+            if 'category2' in df_age.columns:
+                agg_df = df_age.groupby(['category1', 'category2'])['count'].sum().reset_index()
+                for _, row in agg_df.iterrows():
+                    age_group = row['category1']
+                    gender = row['category2']
+                    cnt = int(row['count'])
+                    if age_group and gender and cnt > 0:
+                        if age_group not in age_gender_pyramid:
+                            age_gender_pyramid[age_group] = {'male': 0, 'female': 0}
+                        if '男' in str(gender):
+                            age_gender_pyramid[age_group]['male'] = cnt
+                        elif '女' in str(gender):
+                            age_gender_pyramid[age_group]['female'] = cnt
+        result["age_gender_pyramid"] = age_gender_pyramid
 
-        print(f"[DB] Prefecture stats (batch) for {prefecture}: male={result['male_count']}, female={result['female_count']}, age_dist={result.get('age_distribution', {})}")
+        print(f"[DB] Prefecture stats (batch) for {prefecture}: male={result['male_count']}, female={result['female_count']}, age_dist={result.get('age_distribution', {})}, pyramid_ages={list(age_gender_pyramid.keys())}")
 
     except Exception as e:
         print(f"[ERROR] get_prefecture_stats failed: {e}")
@@ -1769,22 +1814,38 @@ def get_municipality_stats(prefecture: str, municipality: str) -> dict:
             if len(valid_distances) > 0:
                 distance_km = float(valid_distances.mean())
 
-        # AGE_GENDERから年代別分布を計算
+        # AGE_GENDERから年代別分布と年齢×性別ピラミッドを計算
         age_distribution = {"20代": 0, "30代": 0, "40代": 0, "50代": 0, "60代": 0, "70歳以上": 0}
+        age_gender_pyramid = {}  # {"40代": {"male": 1, "female": 2}, ...}
         df_age = batch_data.get("AGE_GENDER", pd.DataFrame())
         print(f"[DEBUG] AGE_GENDER rows for {prefecture}/{municipality}: {len(df_age)}", flush=True)
         if not df_age.empty:
             print(f"[DEBUG] AGE_GENDER columns: {list(df_age.columns)}", flush=True)
-            print(f"[DEBUG] AGE_GENDER sample: {df_age[['category1', 'count']].head().to_dict()}", flush=True)
+            print(f"[DEBUG] AGE_GENDER sample: {df_age[['category1', 'category2', 'count']].head().to_dict()}", flush=True)
         if not df_age.empty and 'category1' in df_age.columns and 'count' in df_age.columns:
             # count列を数値に変換
             df_age['count'] = pd.to_numeric(df_age['count'], errors='coerce').fillna(0)
+            # 年齢層別合計
             age_dist = df_age.groupby('category1')['count'].sum().to_dict()
             print(f"[DEBUG] age_dist after groupby: {age_dist}", flush=True)
             for age_group, cnt in age_dist.items():
                 if age_group in age_distribution:
                     age_distribution[age_group] = int(cnt)
+            # 年齢×性別ピラミッド（実データ）
+            if 'category2' in df_age.columns:
+                for _, row in df_age.iterrows():
+                    age_group = row.get('category1', '')
+                    gender = row.get('category2', '')
+                    cnt = int(row.get('count', 0) or 0)
+                    if age_group and gender and cnt > 0:
+                        if age_group not in age_gender_pyramid:
+                            age_gender_pyramid[age_group] = {'male': 0, 'female': 0}
+                        if '男' in str(gender):
+                            age_gender_pyramid[age_group]['male'] = cnt
+                        elif '女' in str(gender):
+                            age_gender_pyramid[age_group]['female'] = cnt
         print(f"[DEBUG] Final age_distribution: {age_distribution}", flush=True)
+        print(f"[DEBUG] Final age_gender_pyramid: {age_gender_pyramid}", flush=True)
 
         # 女性比率計算
         total = male_count + female_count
@@ -1797,7 +1858,8 @@ def get_municipality_stats(prefecture: str, municipality: str) -> dict:
             "male_count": male_count,
             "female_count": female_count,
             "female_ratio": female_ratio,
-            "age_distribution": age_distribution
+            "age_distribution": age_distribution,
+            "age_gender_pyramid": age_gender_pyramid  # 年齢×性別の実データ
         }
 
     except Exception as e:
@@ -1902,7 +1964,10 @@ def get_qualification_retention_rates(prefecture: str = None, municipality: str 
 
         results = []
         for _, row in agg_df.iterrows():
-            rate = float(row["avg_retention"]) if pd.notna(row["avg_retention"]) else 1.0
+            # 2025-12-31 修正: 推定値を廃止、実データがない場合はスキップ
+            if pd.isna(row["avg_retention"]):
+                continue  # データがない場合は表示しない（嘘をつかない）
+            rate = float(row["avg_retention"])
             interpretation = "地元志向" if rate >= 1.0 else "流出傾向"
             results.append({
                 "qualification": row["qualification"],
@@ -2823,7 +2888,8 @@ def get_workstyle_distribution(prefecture: str = None, municipality: str = None)
         job_type = _current_job_type
         if USE_CSV_MODE:
             df = _load_csv_data()
-            filtered = df[df['row_type'] == 'WORKSTYLE_DISTRIBUTION']
+            # 2025-12-31 修正: CSVモードでもjob_typeフィルタを追加
+            filtered = df[(df['row_type'] == 'WORKSTYLE_DISTRIBUTION') & (df['job_type'] == job_type)]
         else:
             # SQLレベルでフィルタリング（効率化）- job_type含む
             conditions = ["job_type = ?", "row_type = 'WORKSTYLE_DISTRIBUTION'"]
@@ -2879,7 +2945,8 @@ def get_workstyle_age_cross(prefecture: str = None, municipality: str = None) ->
         job_type = _current_job_type
         if USE_CSV_MODE:
             df = _load_csv_data()
-            filtered = df[df['row_type'] == 'WORKSTYLE_AGE_CROSS']
+            # 2025-12-31 修正: CSVモードでもjob_typeフィルタを追加
+            filtered = df[(df['row_type'] == 'WORKSTYLE_AGE_CROSS') & (df['job_type'] == job_type)]
             if prefecture:
                 filtered = filtered[filtered['prefecture'] == prefecture]
             if municipality:
@@ -2933,7 +3000,8 @@ def get_workstyle_gender_cross(prefecture: str = None, municipality: str = None)
         job_type = _current_job_type
         if USE_CSV_MODE:
             df = _load_csv_data()
-            filtered = df[df['row_type'] == 'WORKSTYLE_GENDER_CROSS']
+            # 2025-12-31 修正: CSVモードでもjob_typeフィルタを追加
+            filtered = df[(df['row_type'] == 'WORKSTYLE_GENDER_CROSS') & (df['job_type'] == job_type)]
             if prefecture:
                 filtered = filtered[filtered['prefecture'] == prefecture]
             if municipality:
@@ -2987,7 +3055,8 @@ def get_workstyle_urgency_cross(prefecture: str = None, municipality: str = None
         job_type = _current_job_type
         if USE_CSV_MODE:
             df = _load_csv_data()
-            filtered = df[df['row_type'] == 'WORKSTYLE_URGENCY']
+            # 2025-12-31 修正: CSVモードでもjob_typeフィルタを追加
+            filtered = df[(df['row_type'] == 'WORKSTYLE_URGENCY') & (df['job_type'] == job_type)]
             if prefecture:
                 filtered = filtered[filtered['prefecture'] == prefecture]
             if municipality:
@@ -3041,7 +3110,8 @@ def get_workstyle_employment_cross(prefecture: str = None, municipality: str = N
         job_type = _current_job_type
         if USE_CSV_MODE:
             df = _load_csv_data()
-            filtered = df[df['row_type'] == 'WORKSTYLE_EMPLOYMENT_STATUS']
+            # 2025-12-31 修正: CSVモードでもjob_typeフィルタを追加
+            filtered = df[(df['row_type'] == 'WORKSTYLE_EMPLOYMENT_STATUS') & (df['job_type'] == job_type)]
             if prefecture:
                 filtered = filtered[filtered['prefecture'] == prefecture]
             if municipality:
@@ -3095,7 +3165,8 @@ def get_workstyle_area_count_cross(prefecture: str = None, municipality: str = N
         job_type = _current_job_type
         if USE_CSV_MODE:
             df = _load_csv_data()
-            filtered = df[df['row_type'] == 'WORKSTYLE_DESIRED_AREA_COUNT']
+            # 2025-12-31 修正: CSVモードでもjob_typeフィルタを追加
+            filtered = df[(df['row_type'] == 'WORKSTYLE_DESIRED_AREA_COUNT') & (df['job_type'] == job_type)]
             if prefecture:
                 filtered = filtered[filtered['prefecture'] == prefecture]
             if municipality:
@@ -3182,7 +3253,8 @@ def get_urgency_gender_data(prefecture: str = None, municipality: str = None) ->
         if USE_CSV_MODE:
             df = _load_csv_data()
             print(f"[DB] CSV loaded: {len(df)} rows, row_types: {df['row_type'].unique()[:10].tolist() if 'row_type' in df.columns else 'no row_type column'}")
-            filtered = df[df['row_type'] == 'URGENCY_GENDER']
+            # 2025-12-31 修正: CSVモードでもjob_typeフィルタを追加
+            filtered = df[(df['row_type'] == 'URGENCY_GENDER') & (df['job_type'] == job_type)]
             print(f"[DB] URGENCY_GENDER filtered: {len(filtered)} rows")
         else:
             sql = "SELECT * FROM job_seeker_data WHERE job_type = ? AND row_type = 'URGENCY_GENDER'"
@@ -3247,7 +3319,8 @@ def get_urgency_start_category_data(prefecture: str = None, municipality: str = 
         job_type = _current_job_type
         if USE_CSV_MODE:
             df = _load_csv_data()
-            filtered = df[df['row_type'] == 'URGENCY_START_CATEGORY']
+            # 2025-12-31 修正: CSVモードでもjob_typeフィルタを追加
+            filtered = df[(df['row_type'] == 'URGENCY_START_CATEGORY') & (df['job_type'] == job_type)]
         else:
             sql = "SELECT * FROM job_seeker_data WHERE job_type = ? AND row_type = 'URGENCY_START_CATEGORY'"
             filtered = query_df(sql, (job_type,))
@@ -3306,7 +3379,8 @@ def get_workstyle_mobility_data(prefecture: str = None, municipality: str = None
         job_type = _current_job_type
         if USE_CSV_MODE:
             df = _load_csv_data()
-            filtered = df[df['row_type'] == 'WORKSTYLE_MOBILITY']
+            # 2025-12-31 修正: CSVモードでもjob_typeフィルタを追加
+            filtered = df[(df['row_type'] == 'WORKSTYLE_MOBILITY') & (df['job_type'] == job_type)]
         else:
             sql = "SELECT * FROM job_seeker_data WHERE job_type = ? AND row_type = 'WORKSTYLE_MOBILITY'"
             filtered = query_df(sql, (job_type,))
@@ -3380,7 +3454,8 @@ def get_map_markers(prefecture: str = None) -> list:
         print(f"[DB] get_map_markers called: pref={prefecture} job_type={job_type}")
         if USE_CSV_MODE:
             df = _load_csv_data()
-            filtered = df[df['row_type'] == 'SUMMARY']
+            # 2025-12-31 修正: CSVモードでもjob_typeフィルタを追加
+            filtered = df[(df['row_type'] == 'SUMMARY') & (df['job_type'] == job_type)]
         else:
             sql = "SELECT * FROM job_seeker_data WHERE job_type = ? AND row_type = 'SUMMARY'"
             filtered = query_df(sql, (job_type,))
@@ -3465,7 +3540,8 @@ def get_flow_lines(prefecture: str = None) -> list:
         print(f"[DB] get_flow_lines called: pref={prefecture} job_type={job_type}")
         if USE_CSV_MODE:
             df = _load_csv_data()
-            filtered = df[df['row_type'] == 'RESIDENCE_FLOW']
+            # 2025-12-31 修正: CSVモードでもjob_typeフィルタを追加
+            filtered = df[(df['row_type'] == 'RESIDENCE_FLOW') & (df['job_type'] == job_type)]
         else:
             sql = "SELECT * FROM job_seeker_data WHERE job_type = ? AND row_type = 'RESIDENCE_FLOW'"
             filtered = query_df(sql, (job_type,))
@@ -3568,7 +3644,8 @@ def get_inflow_sources(
 
         if USE_CSV_MODE:
             df = _load_csv_data()
-            filtered = df[df['row_type'] == 'RESIDENCE_FLOW']
+            # 2025-12-31 修正: CSVモードでもjob_typeフィルタを追加
+            filtered = df[(df['row_type'] == 'RESIDENCE_FLOW') & (df['job_type'] == job_type)]
         else:
             filtered = query_df(
                 "SELECT * FROM job_seeker_data WHERE job_type = ? AND row_type = 'RESIDENCE_FLOW'",
@@ -3699,7 +3776,8 @@ def get_flow_balance(
 
         if USE_CSV_MODE:
             df = _load_csv_data()
-            flow_df = df[df['row_type'] == 'RESIDENCE_FLOW']
+            # 2025-12-31 修正: CSVモードでもjob_typeフィルタを追加
+            flow_df = df[(df['row_type'] == 'RESIDENCE_FLOW') & (df['job_type'] == job_type)]
         else:
             flow_df = query_df(
                 "SELECT * FROM job_seeker_data WHERE job_type = ? AND row_type = 'RESIDENCE_FLOW'",
@@ -3784,7 +3862,8 @@ def get_flow_balance(
                 outflow = int(float(row.get('outflow', 0)))
                 net_flow = inflow - outflow
                 total = inflow + outflow
-                ratio = inflow / total if total > 0 else 0.5
+                # 2025-12-31 修正: 0.5推定を廃止、データがない場合は0とする
+                ratio = inflow / total if total > 0 else 0
 
                 lat = float(row.get('latitude', 0) or 0)
                 lng = float(row.get('longitude', 0) or 0)
@@ -3850,7 +3929,8 @@ def get_competing_areas(
 
         if USE_CSV_MODE:
             df = _load_csv_data()
-            filtered = df[df['row_type'] == 'RESIDENCE_FLOW']
+            # 2025-12-31 修正: CSVモードでもjob_typeフィルタを追加
+            filtered = df[(df['row_type'] == 'RESIDENCE_FLOW') & (df['job_type'] == job_type)]
         else:
             filtered = query_df(
                 "SELECT * FROM job_seeker_data WHERE job_type = ? AND row_type = 'RESIDENCE_FLOW'",

@@ -795,13 +795,20 @@ def dashboard_page() -> None:
     state.setdefault("tab", "overview")
     state.setdefault("job_type", "介護職")  # 職種セレクター用（将来拡張予定）
 
-    # 利用可能な職種リスト（Tursoに登録済みの5職種）
+    # 利用可能な職種リスト（Tursoに登録済みの12職種）
     JOB_TYPE_OPTIONS = [
         "介護職",
         "看護師",
         "保育士",
         "栄養士",
         "生活相談員",
+        "理学療法士",
+        "作業療法士",
+        "ケアマネジャー",
+        "サービス管理責任者",
+        "サービス提供責任者",
+        "学童支援",
+        "調理師、調理スタッフ",
     ]
 
     # Header
@@ -1357,29 +1364,39 @@ def dashboard_page() -> None:
                         ui.label("データがありません").style(f"color: {MUTED_COLOR}")
 
                 # === グラフ3: 年齢層×性別分布（グループ化棒グラフ） ===
-                # 選択された地域のデータを使用
+                # 選択された地域のデータを使用（実データ優先）
                 ui.label("年齢層×性別分布").classes("text-sm font-semibold mt-6 mb-2").style(f"color: {MUTED_COLOR}")
                 with ui.card().classes("w-full").style(
                     f"background-color: {CARD_BG}; border: 1px solid {BORDER_COLOR}; padding: 24px; border-radius: 12px"
                 ):
-                    # 選択された地域に応じたage_distributionを使用
+                    # age_gender_pyramidを優先使用（実データ）
                     # 優先順位: 市区町村 > 都道府県 > 全国
-                    if muni_val and muni_stats.get("age_distribution"):
-                        age_dist_data = muni_stats.get("age_distribution", {})
-                    elif pref_val and pref_stats.get("age_distribution"):
-                        age_dist_data = pref_stats.get("age_distribution", {})
+                    age_gender_pyramid = None
+                    if muni_val and muni_stats.get("age_gender_pyramid"):
+                        age_gender_pyramid = muni_stats.get("age_gender_pyramid", {})
+                    elif pref_val and pref_stats.get("age_gender_pyramid"):
+                        age_gender_pyramid = pref_stats.get("age_gender_pyramid", {})
+                    elif nat_stats.get("age_gender_pyramid"):
+                        age_gender_pyramid = nat_stats.get("age_gender_pyramid", {})
+
+                    if age_gender_pyramid:
+                        # 実データを使用
+                        male_by_age = {age: age_gender_pyramid.get(age, {}).get('male', 0) for age in age_order}
+                        female_by_age = {age: age_gender_pyramid.get(age, {}).get('female', 0) for age in age_order}
                     else:
-                        age_dist_data = nat_stats.get("age_distribution", {})
-                    # df_age_distが空でもage_dist_dataがあれば使用
-                    effective_age_dist = age_dist_data if age_dist_data else df_age_dist
-
-                    # 全体の男女比から各年齢層の推定値を計算
-                    total_gender = male_total + female_total
-                    male_ratio = male_total / total_gender if total_gender > 0 else 0.5
-                    female_ratio = female_total / total_gender if total_gender > 0 else 0.5
-
-                    male_by_age = {age: int(effective_age_dist.get(age, 0) * male_ratio) for age in age_order}
-                    female_by_age = {age: int(effective_age_dist.get(age, 0) * female_ratio) for age in age_order}
+                        # フォールバック: 推定値を計算
+                        if muni_val and muni_stats.get("age_distribution"):
+                            age_dist_data = muni_stats.get("age_distribution", {})
+                        elif pref_val and pref_stats.get("age_distribution"):
+                            age_dist_data = pref_stats.get("age_distribution", {})
+                        else:
+                            age_dist_data = nat_stats.get("age_distribution", {})
+                        effective_age_dist = age_dist_data if age_dist_data else df_age_dist
+                        total_gender = male_total + female_total
+                        male_ratio = male_total / total_gender if total_gender > 0 else 0.5
+                        female_ratio = female_total / total_gender if total_gender > 0 else 0.5
+                        male_by_age = {age: int(effective_age_dist.get(age, 0) * male_ratio) for age in age_order}
+                        female_by_age = {age: int(effective_age_dist.get(age, 0) * female_ratio) for age in age_order}
 
                     if any(male_by_age.values()) or any(female_by_age.values()):
                         ui.echart({
