@@ -3120,16 +3120,22 @@ def dashboard_page() -> None:
                                 muni_variants = set(generate_name_variants(muni))
                                 for m in markers_data:
                                     if m.get('municipality') in muni_variants:
-                                        target_lat = m.get('lat')
-                                        target_lng = m.get('lng')
-                                        break
+                                        lat = m.get('lat')
+                                        lng = m.get('lng')
+                                        # 座標が有効な場合のみ採用
+                                        if lat is not None and lng is not None:
+                                            target_lat, target_lng = lat, lng
+                                            break
                             # 市区町村が見つからない場合は都道府県の代表点を使用
                             if target_lat is None and markers_data:
                                 for m in markers_data:
                                     if m.get('prefecture') == pref:
-                                        target_lat = m.get('lat')
-                                        target_lng = m.get('lng')
-                                        break
+                                        lat = m.get('lat')
+                                        lng = m.get('lng')
+                                        # 座標が有効な場合のみ採用
+                                        if lat is not None and lng is not None:
+                                            target_lat, target_lng = lat, lng
+                                            break
                             # それでも見つからない場合は都道府県中心点を使用
                             if target_lat is None:
                                 pref_center = get_pref_center(pref)
